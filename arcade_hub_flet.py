@@ -39,6 +39,7 @@ PLEXUS_GRAY = "#333333"
 PLEXUS_WHITE = "#FFFFFF"
 
 GAMES = [
+    ("Tutorial", "tutorial.py"),
     ("SMT Pick and Place", "circuit_builder.py"),
     ("SMT Reflow", "factory_navigator.py"),
     ("AOI Inspection", "aoi_inspector.py"),
@@ -277,7 +278,7 @@ class ArcadeHub:
 
     def _plexus_button(self, text: str, script_name: str) -> ft.Container:
         def on_hover(e: ft.HoverEvent) -> None:
-            hovered = e.data == "true"
+            hovered = e.data is True
             e.control.bgcolor = PLEXUS_RED if hovered else PLEXUS_GRAY
             e.control.scale = 1.03 if hovered else 1.0
             e.control.update()

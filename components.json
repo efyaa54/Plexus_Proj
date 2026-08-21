@@ -6,44 +6,84 @@
   },
   "components": [
     {
-      "id": "Battery", "img_path": "battery.png",
-      "start_x": 13, "start_y": 5, "w": 163, "h": 163,
-      "target_x": 350, "target_y": 279
+      "id": "Battery",
+      "img_path": "battery.png",
+      "start_x": 850,
+      "start_y": 208,
+      "w": 115,
+      "h": 115,
+      "target_x": 195,
+      "target_y": 342
     },
     {
-      "id": "Chip1", "img_path": "chip1.png",
-      "start_x": 13, "start_y": 88, "w": 146, "h": 166,
-      "target_x": 222, "target_y": 430
+      "id": "Chip1",
+      "img_path": "chip1.png",
+      "start_x": 894,
+      "start_y": 208,
+      "w": 110,
+      "h": 120,
+      "target_x": 90,
+      "target_y": 460
     },
     {
-      "id": "Chip2", "img_path": "chip2.png",
-      "start_x": 13, "start_y": 163, "w": 185, "h": 104,
-      "target_x": 413, "target_y": 589
+      "id": "Chip2",
+      "img_path": "chip2.png",
+      "start_x": 938,
+      "start_y": 208,
+      "w": 144,
+      "h": 75,
+      "target_x": 236,
+      "target_y": 583
     },
     {
-      "id": "Chip3", "img_path": "chip3.png",
-      "start_x": 13, "start_y": 238, "w": 132, "h": 138,
-      "target_x": 465, "target_y": 115
+      "id": "Chip3",
+      "img_path": "chip3.png",
+      "start_x": 982,
+      "start_y": 208,
+      "w": 103,
+      "h": 103,
+      "target_x": 273,
+      "target_y": 213
     },
     {
-      "id": "Chip4", "img_path": "chip4.png",
-      "start_x": 13, "start_y": 313, "w": 112, "h": 95,
-      "target_x": 774, "target_y": 432
+      "id": "Chip4",
+      "img_path": "chip4.png",
+      "start_x": 1026,
+      "start_y": 208,
+      "w": 82,
+      "h": 72,
+      "target_x": 519,
+      "target_y": 459
     },
     {
-      "id": "Chip5", "img_path": "chip5.png",
-      "start_x": 13, "start_y": 388, "w": 148, "h": 130,
-      "target_x": 769, "target_y": 134
+      "id": "Chip5",
+      "img_path": "chip5.png",
+      "start_x": 1070,
+      "start_y": 208,
+      "w": 112,
+      "h": 96,
+      "target_x": 513,
+      "target_y": 226
     },
     {
-      "id": "Chip6", "img_path": "chip6.png",
-      "start_x": 13, "start_y": 463, "w": 37, "h": 70,
-      "target_x": 990, "target_y": 337
+      "id": "Chip6",
+      "img_path": "chip6.png",
+      "start_x": 1114,
+      "start_y": 208,
+      "w": 27,
+      "h": 53,
+      "target_x": 685,
+      "target_y": 382
     },
     {
-      "id": "Chip7", "img_path": "chip7.png",
-      "start_x": 13, "start_y": 538, "w": 74, "h": 123,
-      "target_x": 1012, "target_y": 135
+      "id": "Chip7",
+      "img_path": "chip7.png",
+      "start_x": 1152,
+      "start_y": 208,
+      "w": 57,
+      "h": 94,
+      "target_x": 701,
+      "target_y": 228
     }
   ]
 }

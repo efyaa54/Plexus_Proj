@@ -153,6 +153,7 @@ class TutorialApp:
         self.index = 0
         self._shutting_down = False
 
+
         # Live Video Feed Control
         self.video_image = ft.Image(
             src=None,
@@ -173,18 +174,32 @@ class TutorialApp:
 
         # Build Static UI Layout
         self._configure_window()
-        self.left_column = ft.Column(alignment=ft.MainAxisAlignment.CENTER, spacing=30)
+        self.left_column = ft.Column(
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,  # card/nav fill the wrapper's width
+            spacing=30,
+        )
+        self.left_wrapper = ft.Container(
+            expand=4,
+            content=self.left_column,
+            alignment=ft.Alignment.CENTER,
+        )
+
         self.video_container = ft.Container(
-            width=720, height=540,
+            expand=6,
             border_radius=24,
             border=ft.Border.all(4, PLEXUS_RED),
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
             content=self.video_image,
+            alignment=ft.Alignment.CENTER,
         )
 
         self.body = ft.Row(
-            expand=True, spacing=30, alignment=ft.MainAxisAlignment.CENTER,
-            controls=[self.left_column, self.video_container],
+            expand=True,
+            spacing=30,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[self.left_wrapper, self.video_container],
         )
 
         self.page.add(
@@ -377,6 +392,7 @@ class TutorialApp:
         page.window.prevent_close = True
         page.window.on_event = self._on_window_event
         page.on_keyboard_event = self._on_keyboard_event
+        #page.scroll = ft.ScrollMode.AUTO
 
     def _on_window_event(self, e: ft.WindowEvent) -> None:
         if e.type == ft.WindowEventType.CLOSE:
@@ -449,7 +465,6 @@ class TutorialApp:
         is_last = self.index == len(PAGES) - 1
 
         card = ft.Container(
-            width=500,
             padding=40,
             border_radius=24,
             bgcolor=ft.Colors.with_opacity(0.55, "#111111"),

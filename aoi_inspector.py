@@ -7,6 +7,48 @@ import random
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import os
+import json
+import os
+from datetime import datetime
+
+SCORE_FILE = "player_data.json"
+
+def load_player_data():
+    if os.path.exists(SCORE_FILE):
+        try:
+            with open(SCORE_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "active_player" in data:
+                    return data
+        except json.JSONDecodeError:
+            pass
+            
+    # Default fallback if file doesn't exist or is legacy format
+    return {
+        "active_player": {"name": "Guest", "score": 0, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        "leaderboard": []
+    }
+
+def save_player_data(data):
+    # Ensure active player is also recorded or updated in the leaderboard history
+    active = data["active_player"]
+    leaderboard = data.get("leaderboard", [])
+    
+    # Check if this exact session already exists in leaderboard, update it or append
+    found = False
+    for entry in leaderboard:
+        if entry["name"] == active["name"] and entry["timestamp"] == active["timestamp"]:
+            entry["score"] = active["score"]
+            found = True
+            break
+            
+    if not found:
+        leaderboard.append(active.copy())
+        
+    data["leaderboard"] = leaderboard
+    with open(SCORE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['GLOG_minloglevel'] = '2'
@@ -91,11 +133,22 @@ class AOIInspectorGame:
         self.w, self.h = 1280, 720
         self.window_name = "Plexus AOI Inspector"
 
+        self.player_data = load_player_data()
+        self.score_awarded = False
+
         # --- GAME STATE ---
         self.game_state = "START_SCREEN"
         self.score = 0
         self.current_board_idx = 0
-        self.boards = [False, False, True] # 2 Good, 1 Bad
+        
+        # Setup: 3 Good (False), 2 Bad (True with random bad image index 0 or 1)
+        self.boards = [
+            {"faulty": False, "bad_idx": 0},
+            {"faulty": False, "bad_idx": 0},
+            {"faulty": False, "bad_idx": 0},
+            {"faulty": True, "bad_idx": 0},
+            {"faulty": True, "bad_idx": 1},
+        ]
         random.shuffle(self.boards)
         
         self.feedback_msg = ""
@@ -152,7 +205,13 @@ class AOIInspectorGame:
 
     def load_graphics(self):
         self.board_good = cv2.imread("board_good.png")
-        self.board_bad = cv2.imread("board_bad.png")
+        
+        # Load multiple bad board variations
+        self.board_bads = []
+        for filename in ["board_bad.png", "board_bad2.png"]:
+            img = cv2.imread(filename)
+            if img is not None:
+                self.board_bads.append(img)
         
         # Determine the maximum footprint available for the board on the left side
         max_w, max_h = 750, 560
@@ -163,20 +222,48 @@ class AOIInspectorGame:
             scale = min(max_w / orig_w, max_h / orig_h)
             self.board_good = cv2.resize(self.board_good, (int(orig_w * scale), int(orig_h * scale)))
             
-        if self.board_bad is not None:
-            orig_h, orig_w = self.board_bad.shape[:2]
+        # Dynamically scale all bad boards
+        scaled_bads = []
+        for bad_img in self.board_bads:
+            orig_h, orig_w = bad_img.shape[:2]
             scale = min(max_w / orig_w, max_h / orig_h)
-            self.board_bad = cv2.resize(self.board_bad, (int(orig_w * scale), int(orig_h * scale)))
+            scaled_bads.append(cv2.resize(bad_img, (int(orig_w * scale), int(orig_h * scale))))
+        self.board_bads = scaled_bads
 
         self.synth_good = self.generate_synthetic_board(False, max_w, max_h)
         self.synth_bad = self.generate_synthetic_board(True, max_w, max_h)
 
     def get_current_board_img(self):
-        is_faulty = self.boards[self.current_board_idx]
-        if is_faulty:
-            return self.board_bad if self.board_bad is not None else self.synth_bad
+        board_data = self.boards[self.current_board_idx]
+        if board_data["faulty"]:
+            if self.board_bads:
+                # Pick the specific bad board variant for this round
+                idx = board_data["bad_idx"] % len(self.board_bads)
+                return self.board_bads[idx]
+            else:
+                return self.synth_bad
         else:
             return self.board_good if self.board_good is not None else self.synth_good
+
+    def setup_window(self):
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        
+    def reset_game(self):
+        self.score = 0
+        self.current_board_idx = 0
+        self.boards = [
+            {"faulty": False, "bad_idx": 0},
+            {"faulty": False, "bad_idx": 0},
+            {"faulty": False, "bad_idx": 0},
+            {"faulty": True, "bad_idx": 0},
+            {"faulty": True, "bad_idx": 1},
+        ]
+        random.shuffle(self.boards)
+        self.game_state = "PLAYING"
+        self.gesture_hold_frames = 0
+        self.current_gesture = "None"
+        self.score_awarded = False
 
     def setup_window(self):
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -217,6 +304,7 @@ class AOIInspectorGame:
         self.game_state = "PLAYING"
         self.gesture_hold_frames = 0
         self.current_gesture = "None"
+        self.score_awarded = False
 
     def run(self):
         prev_time = time.time()
@@ -248,7 +336,7 @@ class AOIInspectorGame:
                     draw_rounded_rect(img, (self.w//2 - 460, self.h//2 - 200), (self.w//2 + 460, self.h//2 + 180), (0, 255, 128), 2, 20)
                     cv2.putText(img, "PLEXUS AOI INSPECTOR", (self.w//2 - 280, self.h//2 - 130), 
                                 cv2.FONT_HERSHEY_DUPLEX, 1.4, (0, 255, 128), 2)
-                    cv2.putText(img, "GOAL: Inspect 3 PCBs. Approve the good, reject the defective.", (self.w//2 - 390, self.h//2 - 40), 
+                    cv2.putText(img, "GOAL: Inspect 5 PCBs. Approve the good, reject the defective.", (self.w//2 - 390, self.h//2 - 40), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (230, 230, 230), 1)
                     cv2.putText(img, "CONTROLS: Show 'Thumbs Up' to Pass, 'Thumbs Down' to Reject.", (self.w//2 - 410, self.h//2 + 20), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (180, 200, 220), 1)
@@ -260,10 +348,14 @@ class AOIInspectorGame:
                     # 1. Top Status Bar
                     draw_rounded_rect(img, (40, 20), (self.w - 40, 100), (30, 38, 52), cv2.FILLED, 12)
                     draw_rounded_rect(img, (40, 20), (self.w - 40, 100), (60, 80, 110), 1, 12)
-                    cv2.putText(img, f"INSPECTING BOARD {self.current_board_idx + 1}/3", (70, 65), 
+                    cv2.putText(img, f"INSPECTING BOARD {self.current_board_idx + 1}/5", (70, 65), 
                                 cv2.FONT_HERSHEY_DUPLEX, 1.0, (255, 255, 255), 2)
                     cv2.putText(img, f"SCORE: {self.score}", (self.w - 220, 65), 
                                 cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 255, 128), 2)
+
+                    active = self.player_data["active_player"]
+                    player_text = f"PLAYER: {active['name']}  |  SCORE: {active['score']}"
+                    cv2.putText(img, player_text, (self.w - 600, 65), cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 255, 128), 1)
 
                     # 2. Render Scaled Board Image
                     board_img = self.get_current_board_img()
@@ -352,7 +444,7 @@ class AOIInspectorGame:
 
                     # 6. Final Decision Logic
                     if self.gesture_hold_frames >= self.CONFIRM_FRAMES:
-                        is_faulty = self.boards[self.current_board_idx]
+                        is_faulty = self.boards[self.current_board_idx]["faulty"]
                         if (self.current_gesture == "Thumb_Up" and not is_faulty) or \
                            (self.current_gesture == "Thumb_Down" and is_faulty):
                             self.score += 1
@@ -398,6 +490,15 @@ class AOIInspectorGame:
 
                 # --- GAME OVER STATE ---
                 elif self.game_state == "GAME_OVER":
+
+                    if not self.score_awarded:
+                        # Award points based on correct inspections
+                        if self.score == len(self.boards): 
+                            self.player_data["active_player"]["score"] += 1
+                            save_player_data(self.player_data)
+                            self.score_awarded = True
+
+                        
                     draw_rounded_rect(img, (self.w//2 - 360, self.h//2 - 160), (self.w//2 + 360, self.h//2 + 140), (25, 35, 45), cv2.FILLED, 16)
                     draw_rounded_rect(img, (self.w//2 - 360, self.h//2 - 160), (self.w//2 + 360, self.h//2 + 140), (0, 215, 255), 2, 16)
 

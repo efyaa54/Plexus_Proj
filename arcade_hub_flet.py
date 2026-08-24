@@ -6,8 +6,10 @@ import subprocess
 import sys
 import threading
 import time
+import json
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 import flet as ft
 import psutil
@@ -38,6 +40,8 @@ PLEXUS_CHARCOAL = "#1A1A1A"
 PLEXUS_GRAY = "#333333"
 PLEXUS_WHITE = "#FFFFFF"
 
+SCORE_FILE = "player_data.json"
+
 GAMES = [
     ("Tutorial", "tutorial.py"),
     ("SMT Pick and Place", "circuit_builder.py"),
@@ -46,13 +50,53 @@ GAMES = [
     ("X-Ray Inspection", "defect_detective.py"),
 ]
 
+# --------------------------------------------------------------------------
+# Data Persistence
+# --------------------------------------------------------------------------
+
+SCORE_FILE = "player_data.json"
+
+def load_player_data():
+    if os.path.exists(SCORE_FILE):
+        try:
+            with open(SCORE_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "active_player" in data:
+                    return data
+        except json.JSONDecodeError:
+            pass
+            
+    # Default fallback if file doesn't exist or is legacy format
+    return {
+        "active_player": {"name": "Guest", "score": 0, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        "leaderboard": []
+    }
+
+def save_player_data(data):
+    # Ensure active player is also recorded or updated in the leaderboard history
+    active = data["active_player"]
+    leaderboard = data.get("leaderboard", [])
+    
+    # Check if this exact session already exists in leaderboard, update it or append
+    found = False
+    for entry in leaderboard:
+        if entry["name"] == active["name"] and entry["timestamp"] == active["timestamp"]:
+            entry["score"] = active["score"]
+            found = True
+            break
+            
+    if not found:
+        leaderboard.append(active.copy())
+        
+    data["leaderboard"] = leaderboard
+    with open(SCORE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 # --------------------------------------------------------------------------
 # Win32 focus helpers
 # --------------------------------------------------------------------------
 
 def force_foreground(hwnd: Optional[int]) -> None:
-    """Force focus onto hwnd, bypassing Windows' foreground-lock restriction."""
     if not hwnd or not win32gui.IsWindow(hwnd):
         log.warning("force_foreground: invalid hwnd %r", hwnd)
         return
@@ -69,7 +113,6 @@ def force_foreground(hwnd: Optional[int]) -> None:
         if win32gui.IsIconic(hwnd):
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
 
-        # "Fake alt press" nudges Windows into allowing the foreground switch.
         win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
         win32gui.SetForegroundWindow(hwnd)
         win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
@@ -82,7 +125,6 @@ def force_foreground(hwnd: Optional[int]) -> None:
 
 
 def find_window_by_pid(pid: int, timeout: float = FOCUS_TIMEOUT_S) -> Optional[int]:
-    """Poll for the first visible top-level window belonging to a process id."""
     found: dict[str, Optional[int]] = {"hwnd": None}
 
     def callback(hwnd: int, _: None) -> bool:
@@ -90,7 +132,7 @@ def find_window_by_pid(pid: int, timeout: float = FOCUS_TIMEOUT_S) -> Optional[i
             _, found_pid = win32process.GetWindowThreadProcessId(hwnd)
             if found_pid == pid:
                 found["hwnd"] = hwnd
-                return False  # stop enumerating
+                return False  
         return True
 
     deadline = time.time() + timeout
@@ -103,11 +145,6 @@ def find_window_by_pid(pid: int, timeout: float = FOCUS_TIMEOUT_S) -> Optional[i
 
 
 def kill_process_tree() -> None:
-    """Terminate (then force-kill) every child of the current process.
-
-    Needed because the Flet desktop window runs as a separate Flutter
-    renderer subprocess -- exiting the Python process alone doesn't close it.
-    """
     try:
         children = psutil.Process(os.getpid()).children(recursive=True)
     except psutil.NoSuchProcess:
@@ -126,23 +163,20 @@ def kill_process_tree() -> None:
         except psutil.NoSuchProcess:
             pass
 
-
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 
 class ArcadeHub:
-    """Owns hub state so we're not threading `global` through every closure."""
-
     def __init__(self, page: ft.Page):
         self.page = page
         self.game_process: Optional[subprocess.Popen] = None
         self._shutting_down = False
+        
+        self.player_data = load_player_data()
 
         self._configure_window()
         self._build_ui()
-
-    # -- window / lifecycle -------------------------------------------------
 
     def _configure_window(self) -> None:
         page = self.page
@@ -163,7 +197,6 @@ class ArcadeHub:
             self.shutdown()
 
     def shutdown(self) -> None:
-        """Single exit path for both the OS close button and Escape."""
         if self._shutting_down:
             return
         self._shutting_down = True
@@ -179,8 +212,6 @@ class ArcadeHub:
         kill_process_tree()
         os._exit(0)
 
-    # -- toast ---------------------------------------------------------------
-
     def show_toast(self, message: str, color: str = PLEXUS_RED) -> None:
         self.page.snack_bar = ft.SnackBar(
             content=ft.Text(message, color=PLEXUS_WHITE, weight=ft.FontWeight.BOLD),
@@ -190,7 +221,27 @@ class ArcadeHub:
         self.page.snack_bar.open = True
         self.page.update()
 
-    # -- game launching --------------------------------------------------
+    def start_new_session(self, e) -> None:
+        name = self.name_input.value.strip()
+        if not name:
+            name = "Guest"
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Load existing data to keep leaderboard history intact
+        data = load_player_data()
+        data["active_player"] = {"name": name, "score": 0, "timestamp": timestamp}
+        
+        save_player_data(data)
+        self.player_data = data
+        
+        self.update_score_display()
+        self.show_toast(f"Session started for {name} at {timestamp}!", ft.Colors.GREEN_700)
+
+    def update_score_display(self) -> None:
+        active = self.player_data["active_player"]
+        self.score_text.value = f"ACTIVE PLAYER: {active['name']}  |  SCORE: {active['score']}"
+        self.page.update()
 
     def launch_game(self, script_name: str) -> None:
         if self.game_process is not None and self.game_process.poll() is None:
@@ -228,6 +279,11 @@ class ArcadeHub:
             self.game_process = None
             page.window.visible = True
             page.window.minimized = False
+            
+            # --- RELOAD SCORE DATA UPON RETURN ---
+            self.player_data = load_player_data()
+            self.update_score_display()
+            
             page.update()
 
             hub_hwnd = win32gui.FindWindow(None, APP_TITLE)
@@ -236,9 +292,53 @@ class ArcadeHub:
             page.on_keyboard_event = self._on_keyboard_event
             self.show_toast("Returned to Arcade Hub", PLEXUS_CHARCOAL)
 
-    # -- UI ------------------------------------------------------------------
-
     def _build_ui(self) -> None:
+
+        active = self.player_data["active_player"]
+        
+        self.name_input = ft.TextField(
+            value=self.player_data["active_player"]["name"],
+            label="Player Name",
+            width=250,
+            border_color=PLEXUS_GRAY,
+            focused_border_color=PLEXUS_RED,
+            color=PLEXUS_WHITE,
+            bgcolor=PLEXUS_CHARCOAL,
+            height=50,
+            content_padding=10
+        )
+        
+        self.score_text = ft.Text(
+            f"PLAYER: {active['name']}  |  SCORE: {active['score']}",
+            color=PLEXUS_RED,
+            style=ft.TextStyle(size=18, weight=ft.FontWeight.BOLD, letter_spacing=1),
+        )
+
+        def on_session_btn_hover(e: ft.HoverEvent) -> None:
+            hovered = str(e.data).lower() == "true"
+            e.control.bgcolor = PLEXUS_RED if hovered else PLEXUS_GRAY
+            e.control.update()
+
+        session_btn = ft.Container(
+            content=ft.Text("Start New Session", weight=ft.FontWeight.BOLD, color=PLEXUS_WHITE),
+            bgcolor=PLEXUS_GRAY,
+            height=50,
+            padding=ft.Padding.symmetric(horizontal=20),
+            border_radius=8,
+            alignment=ft.Alignment(0, 0),
+            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
+            on_hover=on_session_btn_hover,
+            on_click=self.start_new_session,
+        )
+
+        player_registration_row = ft.Row(
+            alignment=ft.MainAxisAlignment.CENTER,
+            controls=[
+                self.name_input,
+                session_btn
+            ]
+        )
+
         self.page.add(
             ft.Container(
                 expand=True,
@@ -248,26 +348,23 @@ class ArcadeHub:
                     padding=60,
                     width=700,
                     border_radius=100,
-                    bgcolor=ft.Colors.with_opacity(0.4, PLEXUS_CHARCOAL),
+                    bgcolor=ft.Colors.with_opacity(0.65, PLEXUS_CHARCOAL),
                     blur=ft.Blur(5, 5, ft.BlurTileMode.MIRROR),
                     content=ft.Column(
                         alignment=ft.MainAxisAlignment.CENTER,
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=20,
+                        spacing=15,
                         tight=True,
                         controls=[
-                            ft.Image(src="plexus_logo.png", width=300, fit=ft.BoxFit.CONTAIN),
+                            ft.Image(src="plexus_logo.png", width=250, fit=ft.BoxFit.CONTAIN),
                             ft.Text(
                                 "PLEXUS AI ARCADE",
                                 color=PLEXUS_WHITE,
-                                style=ft.TextStyle(size=42, weight=ft.FontWeight.W_900, letter_spacing=2),
+                                style=ft.TextStyle(size=36, weight=ft.FontWeight.W_900, letter_spacing=2),
                             ),
-                            ft.Text(
-                                "Engineering the Future with Artificial Intelligence",
-                                size=16,
-                                color=ft.Colors.WHITE70,
-                                italic=True,
-                            ),
+                            self.score_text,
+                            ft.Container(height=10),
+                            player_registration_row,
                             ft.Container(height=20),
                             *[self._plexus_button(label, script) for label, script in GAMES],
                         ],
@@ -296,10 +393,8 @@ class ArcadeHub:
             on_click=lambda e: self.launch_game(script_name),
         )
 
-
 def main(page: ft.Page) -> None:
     ArcadeHub(page)
-
 
 if __name__ == "__main__":
     ft.run(main)

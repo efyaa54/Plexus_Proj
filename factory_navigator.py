@@ -4,9 +4,54 @@ import mediapipe as mp
 import time
 import math
 import threading
+import collections
+import subprocess
+import random
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import os
+import json
+import os
+from datetime import datetime
+
+SCORE_FILE = "player_data.json"
+
+def load_player_data():
+    if os.path.exists(SCORE_FILE):
+        try:
+            with open(SCORE_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "active_player" in data:
+                    return data
+        except json.JSONDecodeError:
+            pass
+            
+    # Default fallback if file doesn't exist or is legacy format
+    return {
+        "active_player": {"name": "Guest", "score": 0, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        "leaderboard": []
+    }
+
+def save_player_data(data):
+    # Ensure active player is also recorded or updated in the leaderboard history
+    active = data["active_player"]
+    leaderboard = data.get("leaderboard", [])
+    
+    # Check if this exact session already exists in leaderboard, update it or append
+    found = False
+    for entry in leaderboard:
+        if entry["name"] == active["name"] and entry["timestamp"] == active["timestamp"]:
+            entry["score"] = active["score"]
+            found = True
+            break
+            
+    if not found:
+        leaderboard.append(active.copy())
+        
+    data["leaderboard"] = leaderboard
+    with open(SCORE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['GLOG_minloglevel'] = '2'
@@ -46,11 +91,10 @@ def draw_rounded_rect(img, pt1, pt2, color, thickness=1, radius=15):
     """Draws a sleek rounded rectangle card for modern UI elements."""
     x1, y1 = pt1
     x2, y2 = pt2
-    
-    # FIX: Prevent geometry inversion when the progress bar is nearly empty
+
     if x2 - x1 < 2 * radius: x2 = x1 + 2 * radius
     if y2 - y1 < 2 * radius: y2 = y1 + 2 * radius
-    
+
     if thickness == cv2.FILLED:
         cv2.rectangle(img, (x1 + radius, y1), (x2 - radius, y2), color, cv2.FILLED)
         cv2.rectangle(img, (x1, y1 + radius), (x2, y2 - radius), color, cv2.FILLED)
@@ -72,7 +116,6 @@ def draw_rounded_rect(img, pt1, pt2, color, thickness=1, radius=15):
 # ENGINE CLASSES
 # ==========================================
 class WebcamStream:
-    """Runs the camera on a dedicated background thread to prevent UI freezing."""
     def __init__(self, src=0, width=1280, height=720):
         self.cap = cv2.VideoCapture(src)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -91,7 +134,7 @@ class WebcamStream:
                     with self.lock:
                         self.ret, self.frame = ret, frame
             except Exception as e:
-                print(f"Camera read error: {e}")
+                pass
 
     def read(self):
         with self.lock:
@@ -111,21 +154,39 @@ class FactoryNavigatorGame:
         self.w, self.h = 1280, 720
         self.window_name = "Plexus Factory Navigator"
 
+        self.player_data = load_player_data()
+        self.score_awarded = False
+
+        # --- UNIFIED LAYOUT CONSTANTS ---
+        self.game_w, self.game_h = 750, 560
+        self.game_x = 50
+        self.game_y = (self.h - self.game_h) // 2 + 40
+        
+        self.panel_x = self.game_x + self.game_w + 40
+        self.panel_y = self.game_y
+        self.panel_w = (self.w - 40) - self.panel_x
+        self.panel_h = self.game_h
+
         # --- GAME STATE ---
         self.game_state = "START_SCREEN"
         self.distance = 0.0
         self.max_distance = 100.0  
         self.health = 3
         self.hit_flash_timer = 0    
-        self.debug_mode = False     
         self.finish_line_obj = None
 
+        # --- DEBUG TELEMETRY ---
+        self.debug_mode = False     
+        self.fps_history = collections.deque(maxlen=60)
+        self.inf_history = collections.deque(maxlen=60)
+        self.confidence_score = 0.0
+
         # --- PLAYER STATE (ROBOT) ---
-        self.robot_radius = 120 
+        self.robot_radius = 70 
         self.robot_speed = 6
-        self.target_robot_x = self.w / 2
-        self.robot_x = self.w / 2
-        self.robot_y = 600
+        self.target_robot_x = self.game_w / 2
+        self.robot_x = self.game_w / 2
+        self.robot_y = self.game_h - 100
 
         # --- BELT & OBSTACLE STATE ---
         self.belt_offset = 0
@@ -134,6 +195,12 @@ class FactoryNavigatorGame:
         self.obstacles = []
         self.spawn_timer = 0
         self.spawn_rate = 50  
+
+        # --- STEERING / LEAN DETECTION ---
+        self.LEAN_RATIO_THRESHOLD = 0.35
+        self.lean_ratio = 0.0
+        self.steering_command = "CENTERED"
+        self.steering_color = (120, 220, 255)
 
         # --- ASSET LOADING ---
         self.load_graphics()
@@ -178,6 +245,8 @@ class FactoryNavigatorGame:
 
     def inference_worker(self):
         start_time = time.time()
+        last_timestamp = -1
+
         while self.inference_running:
             success, frame = self.stream.read()
             if not success or frame is None:
@@ -187,13 +256,22 @@ class FactoryNavigatorGame:
             frame = cv2.flip(frame, 1) 
             img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-            
+
             timestamp_ms = int((time.time() - start_time) * 1000)
             
+            # Ensure timestamp strictly increases for video mode
+            if timestamp_ms <= last_timestamp:
+                timestamp_ms = last_timestamp + 1
+            last_timestamp = timestamp_ms
+
             try:
+                start_t = time.perf_counter()
                 result = self.detector.detect_for_video(mp_image, timestamp_ms)
+                inf_time = (time.perf_counter() - start_t) * 1000
+
                 with self.inference_lock:
                     self.latest_result = result
+                    self.inf_history.append(inf_time)
             except Exception:
                 pass
 
@@ -206,26 +284,156 @@ class FactoryNavigatorGame:
         self.spawn_rate = 50
         self.distance = 0.0 
         self.health = 3
-        self.target_robot_x = self.w / 2 
-        self.robot_x = self.w / 2
+        self.target_robot_x = self.game_w / 2 
+        self.robot_x = self.game_w / 2
         self.finish_line_obj = None
         self.game_state = "PLAYING"
+        self.score_awarded = False
+
+    def draw_header(self, display):
+        """Draws the top banner UI to match Circuit Builder style."""
+        draw_rounded_rect(display, (50, 15), (self.w - 50, 70), (30, 38, 52), cv2.FILLED, 10)
+        draw_rounded_rect(display, (50, 15), (self.w - 50, 70), (60, 80, 110), 1, 10)
+        
+        cv2.putText(display, "PLEXUS FACTORY NAVIGATOR", (75, 52), cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 255, 255), 1)
+
+        active = self.player_data["active_player"]
+        player_text = f"PLAYER: {active['name']}  |  SCORE: {active['score']}"
+        cv2.putText(display, player_text, (self.w - 800, 52), cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 255, 128), 1)
+        
+        # OVEN PROGRESS BAR
+        bar_w = 400
+        bar_x1 = self.w - 50 - bar_w - 20
+        bar_y1 = 28
+        bar_x2 = bar_x1 + bar_w
+        bar_y2 = 58
+        
+        draw_rounded_rect(display, (bar_x1, bar_y1), (bar_x2, bar_y2), (20, 24, 33), cv2.FILLED, 8)
+        filled_w = int((bar_x2 - bar_x1) * (self.distance / self.max_distance))
+        if filled_w > 0:
+            draw_rounded_rect(display, (bar_x1, bar_y1), (bar_x1 + filled_w, bar_y2), (0, 180, 255), cv2.FILLED, 8)
+        draw_rounded_rect(display, (bar_x1, bar_y1), (bar_x2, bar_y2), (90, 110, 140), 1, 8)
+        
+        cv2.putText(display, f"OVEN PROGRESS: {int(self.distance)}m / {int(self.max_distance)}m", 
+                    (bar_x1 + 35, bar_y1 + 19), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+    def draw_operator_panel(self, display, results):
+        """Draws the right-side dashboard containing the HP, Lean Gauge, and PiP Feed."""
+        panel_x, panel_y, panel_w, panel_h = self.panel_x, self.panel_y, self.panel_w, self.panel_h
+
+        draw_rounded_rect(display, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (30, 38, 52), cv2.FILLED, 15)
+        draw_rounded_rect(display, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (60, 80, 110), 2, 15)
+
+        text_x = panel_x + 30
+        current_y = panel_y + 45
+        cv2.putText(display, "OPERATOR DASHBOARD", (text_x, current_y), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+        
+        current_y += 40
+        card_w = panel_w - 60
+
+        # --- HP INDICATOR ---
+        cv2.putText(display, "ROBOT INTEGRITY", (text_x, current_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        current_y += 15
+        for h_idx in range(3):
+            color = (0, 255, 128) if h_idx < self.health else (60, 70, 90)
+            hx = text_x + (h_idx * 55)
+            draw_rounded_rect(display, (hx, current_y), (hx + 45, current_y + 25), color, cv2.FILLED, 6)
+        
+        # --- LEAN STEERING GAUGE ---
+        current_y += 65
+        cv2.putText(display, "LEAN STEERING GAUGE", (text_x, current_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        current_y += 15
+        
+        gauge_h = 30
+        cv2.rectangle(display, (text_x, current_y), (text_x + card_w, current_y + gauge_h), (15, 20, 30), cv2.FILLED)
+        cv2.rectangle(display, (text_x, current_y), (text_x + card_w, current_y + gauge_h), (90, 110, 140), 1)
+
+        center_tick = text_x + card_w // 2
+        max_range = 1.0  
+        thresh_offset_px = int((self.LEAN_RATIO_THRESHOLD / max_range) * (card_w / 2))
+        
+        # Threshold lines
+        cv2.line(display, (center_tick - thresh_offset_px, current_y - 2), (center_tick - thresh_offset_px, current_y + gauge_h + 2), (255, 200, 0), 2)
+        cv2.line(display, (center_tick + thresh_offset_px, current_y - 2), (center_tick + thresh_offset_px, current_y + gauge_h + 2), (255, 200, 0), 2)
+
+        # Indicator dot
+        clamped_ratio = max(-max_range, min(max_range, self.lean_ratio))
+        indicator_offset = int((clamped_ratio / max_range) * (card_w / 2))
+        cv2.circle(display, (center_tick + indicator_offset, current_y + gauge_h // 2), 7, self.steering_color, cv2.FILLED)
+
+        status_msg = f"STATUS: {self.steering_command}"
+        cv2.putText(display, status_msg, (text_x, current_y + gauge_h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.steering_color, 1, cv2.LINE_AA)
+
+        # --- LIVE CAMERA FEED ---
+        pip_h = min(int(card_w * (9 / 16)), 240)
+        pip_w = int(pip_h * (16 / 9))
+        pip_x = text_x + (card_w - pip_w) // 2
+        panel_bottom = panel_y + panel_h - 20
+        pip_y = panel_bottom - pip_h
+
+        cv2.putText(display, "LIVE CAMERA FEED", (pip_x, pip_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+        success_pip, pip_frame = self.stream.read()
+        if success_pip and pip_frame is not None:
+            pip_resized = cv2.resize(cv2.flip(pip_frame, 1), (pip_w, pip_h))
+            
+            pose_visible = bool(results and results.pose_landmarks)
+            if pose_visible:
+                lms = results.pose_landmarks[0]
+                lx_p, ly_p = int(lms[11].x * pip_w), int(lms[11].y * pip_h)
+                rx_p, ry_p = int(lms[12].x * pip_w), int(lms[12].y * pip_h)
+                lean_color = (0, 255, 128) if abs(self.lean_ratio) > self.LEAN_RATIO_THRESHOLD else (0, 220, 255)
+                cv2.line(pip_resized, (lx_p, ly_p), (rx_p, ry_p), lean_color, 2)
+                cv2.circle(pip_resized, (lx_p, ly_p), 6, lean_color, -1)
+                cv2.circle(pip_resized, (rx_p, ry_p), 6, lean_color, -1)
+
+            draw_rounded_rect(display, (pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3), (100, 120, 150), 2, 8)
+            display[pip_y:pip_y+pip_h, pip_x:pip_x+pip_w] = pip_resized
+
+            if not pose_visible:
+                warn = display[pip_y:pip_y+pip_h, pip_x:pip_x+pip_w].copy()
+                cv2.rectangle(warn, (0, 0), (pip_w, pip_h), (0, 0, 0), cv2.FILLED)
+                cv2.addWeighted(warn, 0.55, display[pip_y:pip_y+pip_h, pip_x:pip_x+pip_w], 0.45, 0,
+                                display[pip_y:pip_y+pip_h, pip_x:pip_x+pip_w])
+                cv2.putText(display, "NO PLAYER DETECTED", (pip_x + 20, pip_y + pip_h // 2),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 100, 255), 2)
+
+    def draw_debug_hud(self, surface, smoothed_fps):
+        if not self.debug_mode: return
+        
+        hud_w, hud_h = 300, 200
+        debug_overlay = surface.copy()
+        draw_rounded_rect(debug_overlay, (20, 120), (20 + hud_w, 120 + hud_h), (15, 20, 30), cv2.FILLED, 10)
+        cv2.addWeighted(debug_overlay, 0.75, surface, 0.25, 0, surface)
+        draw_rounded_rect(surface, (20, 120), (20 + hud_w, 120 + hud_h), (0, 180, 255), 1, 10)
+
+        current_inf = self.inf_history[-1] if self.inf_history else 0
+        
+        cv2.putText(surface, "[DEBUG TELEMETRY]", (35, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 215, 255), 1)
+        cv2.putText(surface, f"Render FPS: {int(smoothed_fps)}", (35, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 1)
+        cv2.putText(surface, f"Infer Latency: {int(current_inf)}ms", (35, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+        cv2.putText(surface, f"Active Obstacles: {len(self.obstacles)}", (35, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+        cv2.putText(surface, f"Belt Speed: {self.belt_speed:.2f}", (35, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+        cv2.putText(surface, f"Lean Ratio: {self.lean_ratio:.2f}", (35, 255), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.putText(surface, f"Inference Thread Active: {self.inference_thread.is_alive()}", (35, 275), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128) if self.inference_thread.is_alive() else (0, 0, 255), 1)
 
     def run(self):
         prev_time = time.time()
         smoothed_fps = 0.0
-        import random
 
         try:
             while True:
                 with self.inference_lock:
                     results = self.latest_result
 
-                img = np.full((self.h, self.w, 3), (20, 24, 33), dtype=np.uint8)
+                # 1. Base display background
+                display = np.full((self.h, self.w, 3), (25, 25, 25), dtype=np.uint8)
+                
+                # 2. Local canvas just for the game area
+                game_canvas = np.full((self.game_h, self.game_w, 3), (20, 24, 33), dtype=np.uint8)
 
-                steering_command = "CENTERED"
-                steering_color = (120, 220, 255)
-                shoulder_lean_diff = 0.0
+                self.steering_command = "CENTERED"
+                self.steering_color = (120, 220, 255)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27: 
@@ -254,12 +462,10 @@ class FactoryNavigatorGame:
                     if self.belt_offset > 100: 
                         self.belt_offset = 0
 
-                    # FIX: Dynamic Finish Line Calculation
-                    # Calculate exactly when to spawn the line so it hits robot_y perfectly at 100m
                     frames_to_reach_robot = (self.robot_y + 100) / self.belt_speed
                     distance_covered_in_frames = frames_to_reach_robot * 0.05
                     spawn_distance = self.max_distance - distance_covered_in_frames
-                    
+
                     if self.distance >= spawn_distance and self.finish_line_obj is None:
                         self.finish_line_obj = {"y": -100.0}
 
@@ -270,8 +476,8 @@ class FactoryNavigatorGame:
                         self.spawn_timer += 1
                         if self.spawn_timer >= self.spawn_rate:
                             self.spawn_timer = 0
-                            obs_x = random.randint(150, self.w - 150)
-                            obs_radius = random.randint(45, 75) 
+                            obs_x = random.randint(90, self.game_w - 90)
+                            obs_radius = random.randint(30, 50) 
 
                             scaled_hazard = None
                             if self.hazard_img_raw is not None:
@@ -287,7 +493,7 @@ class FactoryNavigatorGame:
 
                     for obs in self.obstacles[:]:
                         obs["y"] += self.belt_speed
-                        if obs["y"] > self.h + 100:
+                        if obs["y"] > self.game_h + 100:
                             self.obstacles.remove(obs)
                         elif math.hypot(self.robot_x - obs["x"], self.robot_y - obs["y"]) < (self.robot_radius + obs["r"]) * 0.6: 
                             if self.hit_flash_timer == 0: 
@@ -295,55 +501,57 @@ class FactoryNavigatorGame:
                                 self.hit_flash_timer = 45 
                                 self.belt_speed = max(2.0, self.belt_speed - 1.0)
                                 self.obstacles.remove(obs)
-                                
+
                                 if self.health <= 0:
                                     self.game_state = "GAME_OVER"
                                     break
 
                     if results and results.pose_landmarks:
-                        landmarks = results.pose_landmarks[0] 
-                        left_shoulder_y = landmarks[11].y
-                        right_shoulder_y = landmarks[12].y
-                        lean_threshold = 0.05 
-                        shoulder_lean_diff = left_shoulder_y - right_shoulder_y
+                        landmarks = results.pose_landmarks[0]
+                        left_shoulder = landmarks[11]
+                        right_shoulder = landmarks[12]
 
-                        if left_shoulder_y > right_shoulder_y + lean_threshold:
-                            steering_command = "TURNING RIGHT"
-                            steering_color = (0, 255, 128) 
+                        shoulder_width = max(abs(left_shoulder.x - right_shoulder.x), 1e-4)
+                        raw_lean_diff = left_shoulder.y - right_shoulder.y
+                        self.lean_ratio = raw_lean_diff / shoulder_width
+
+                        if self.lean_ratio > self.LEAN_RATIO_THRESHOLD:
+                            self.steering_command = "TURNING RIGHT"
+                            self.steering_color = (0, 255, 128) 
                             self.target_robot_x += self.robot_speed 
-                        elif right_shoulder_y > left_shoulder_y + lean_threshold:
-                            steering_command = "TURNING LEFT"
-                            steering_color = (60, 120, 255) 
+                        elif self.lean_ratio < -self.LEAN_RATIO_THRESHOLD:
+                            self.steering_command = "TURNING LEFT"
+                            self.steering_color = (60, 120, 255) 
                             self.target_robot_x -= self.robot_speed 
 
-                    self.target_robot_x = max(self.robot_radius, min(self.w - self.robot_radius, self.target_robot_x))
+                    self.target_robot_x = max(self.robot_radius, min(self.game_w - self.robot_radius, self.target_robot_x))
                     self.robot_x = lerp(self.robot_x, self.target_robot_x, alpha=0.15)
 
                 elif self.game_state in ["GAME_OVER", "WIN"]:
                     if key == ord('r') or key == ord('R'):
                         self.reset_game()
 
-                # --- RENDERING ---
-                for i in range(-100, self.h, 100):
+                # --- RENDER LOCAL GAME CANVAS ---
+                for i in range(-100, self.game_h, 100):
                     line_y = i + self.belt_offset
-                    cv2.line(img, (0, int(line_y)), (self.w, int(line_y)), (38, 48, 64), 3, cv2.LINE_AA)
+                    cv2.line(game_canvas, (0, int(line_y)), (self.game_w, int(line_y)), (38, 48, 64), 3, cv2.LINE_AA)
 
-                cv2.line(img, (20, 0), (20, self.h), (0, 180, 255), 4)
-                cv2.line(img, (self.w - 20, 0), (self.w - 20, self.h), (0, 180, 255), 4)
+                cv2.line(game_canvas, (20, 0), (20, self.game_h), (0, 180, 255), 4)
+                cv2.line(game_canvas, (self.game_w - 20, 0), (self.game_w - 20, self.game_h), (0, 180, 255), 4)
 
                 if self.finish_line_obj is not None:
                     fy = int(self.finish_line_obj["y"])
-                    if -100 <= fy <= self.h + 100:
-                        cv2.rectangle(img, (40, fy - 12), (self.w - 40, fy + 12), (255, 255, 255), cv2.FILLED)
-                        cv2.rectangle(img, (40, fy - 12), (self.w - 40, fy + 12), (0, 215, 255), 2)
-                        cv2.putText(img, "REFLOW OVEN EXIT / FINISH LINE", (self.w // 2 - 200, fy + 6), 
+                    if -100 <= fy <= self.game_h + 100:
+                        cv2.rectangle(game_canvas, (40, fy - 12), (self.game_w - 40, fy + 12), (255, 255, 255), cv2.FILLED)
+                        cv2.rectangle(game_canvas, (40, fy - 12), (self.game_w - 40, fy + 12), (0, 215, 255), 2)
+                        cv2.putText(game_canvas, "REFLOW OVEN EXIT / FINISH LINE", (self.game_w // 2 - 200, fy + 6), 
                                     cv2.FONT_HERSHEY_DUPLEX, 0.7, (20, 24, 33), 2)
 
                 for obs in self.obstacles:
                     if obs["img"] is not None:
-                        img = overlay_transparent(img, obs["img"], obs["x"] - obs["r"], obs["y"] - obs["r"])
+                        game_canvas = overlay_transparent(game_canvas, obs["img"], obs["x"] - obs["r"], obs["y"] - obs["r"])
                     else:
-                        cv2.circle(img, (obs["x"], int(obs["y"])), obs["r"], (0, 100, 255), cv2.FILLED)
+                        cv2.circle(game_canvas, (obs["x"], int(obs["y"])), obs["r"], (0, 100, 255), cv2.FILLED)
 
                 rx = int(self.robot_x)
                 if self.hit_flash_timer > 0 and (self.hit_flash_timer // 5) % 2 == 0:
@@ -351,135 +559,80 @@ class FactoryNavigatorGame:
                         red_robot = self.robot_img.copy()
                         red_robot[:, :, 0] = 0 
                         red_robot[:, :, 1] = 0 
-                        img = overlay_transparent(img, red_robot, rx - self.robot_radius, self.robot_y - self.robot_radius)
+                        game_canvas = overlay_transparent(game_canvas, red_robot, rx - self.robot_radius, self.robot_y - self.robot_radius)
                     else:
-                        cv2.circle(img, (rx, self.robot_y), self.robot_radius, (0, 0, 255), cv2.FILLED)
+                        cv2.circle(game_canvas, (rx, self.robot_y), self.robot_radius, (0, 0, 255), cv2.FILLED)
                 else:
                     if self.robot_img is not None:
-                        img = overlay_transparent(img, self.robot_img, rx - self.robot_radius, self.robot_y - self.robot_radius)
+                        game_canvas = overlay_transparent(game_canvas, self.robot_img, rx - self.robot_radius, self.robot_y - self.robot_radius)
                     else:
-                        cv2.circle(img, (rx, self.robot_y), self.robot_radius, (28, 41, 218), cv2.FILLED)
+                        cv2.circle(game_canvas, (rx, self.robot_y), self.robot_radius, (28, 41, 218), cv2.FILLED)
 
-                # --- WEBCAM PICTURE-IN-PICTURE (PiP) FEED ---
-                success_pip, pip_frame = self.stream.read()
-                if success_pip and pip_frame is not None:
-                    pip_frame = cv2.flip(pip_frame, 1)
-                    pip_w, pip_h = 240, 135
-                    pip_resized = cv2.resize(pip_frame, (pip_w, pip_h))
-                    
-                    if results and results.pose_landmarks:
-                        lms = results.pose_landmarks[0]
-                        lx_p = int(lms[11].x * pip_w)
-                        ly_p = int(lms[11].y * pip_h)
-                        rx_p = int(lms[12].x * pip_w)
-                        ry_p = int(lms[12].y * pip_h)
-                        cv2.circle(pip_resized, (lx_p, ly_p), 4, (0, 255, 128), -1)
-                        cv2.circle(pip_resized, (rx_p, ry_p), 4, (0, 255, 128), -1)
-                        cv2.line(pip_resized, (lx_p, ly_p), (rx_p, ry_p), (0, 255, 128), 2)
+                # Map local game_canvas to the main display
+                display[self.game_y:self.game_y+self.game_h, self.game_x:self.game_x+self.game_w] = game_canvas
+                # Draw sleek border around the game area
+                draw_rounded_rect(display, (self.game_x, self.game_y), (self.game_x + self.game_w, self.game_y + self.game_h), (60, 80, 110), 2, 10)
 
-                    pip_x, pip_y = 30, self.h - pip_h - 35
-                    draw_rounded_rect(img, (pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3), (0, 180, 255), 1, 8)
-                    img[pip_y:pip_y+pip_h, pip_x:pip_x+pip_w] = pip_resized
-                    cv2.putText(img, "LIVE TRACKING", (pip_x + 8, pip_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                # --- DRAW UI PANELS ---
+                self.draw_header(display)
+                self.draw_operator_panel(display, results)
 
-                # --- MODERN GUI OVERLAYS ---
+                # --- OVERLAYS ---
                 if self.game_state == "START_SCREEN":
-                    overlay = img.copy()
+                    overlay = display.copy()
                     cv2.rectangle(overlay, (0, 0), (self.w, self.h), (10, 12, 18), cv2.FILLED)
-                    cv2.addWeighted(overlay, 0.85, img, 0.15, 0, img)
+                    cv2.addWeighted(overlay, 0.85, display, 0.15, 0, display)
 
-                    draw_rounded_rect(img, (self.w//2 - 460, self.h//2 - 200), (self.w//2 + 460, self.h//2 + 180), (45, 55, 75), cv2.FILLED, 20)
-                    draw_rounded_rect(img, (self.w//2 - 460, self.h//2 - 200), (self.w//2 + 460, self.h//2 + 180), (0, 180, 255), 2, 20)
+                    draw_rounded_rect(display, (self.w//2 - 460, self.h//2 - 200), (self.w//2 + 460, self.h//2 + 180), (45, 55, 75), cv2.FILLED, 20)
+                    draw_rounded_rect(display, (self.w//2 - 460, self.h//2 - 200), (self.w//2 + 460, self.h//2 + 180), (0, 180, 255), 2, 20)
 
-                    cv2.putText(img, "PLEXUS FACTORY NAVIGATOR", (self.w//2 - 320, self.h//2 - 130), 
+                    cv2.putText(display, "PLEXUS FACTORY NAVIGATOR", (self.w//2 - 320, self.h//2 - 130), 
                                 cv2.FONT_HERSHEY_DUPLEX, 1.1, (0, 215, 255), 2)
-                    cv2.putText(img, "GOAL: Guide your PCB safely through the reflow oven to 100m!", (self.w//2 - 390, self.h//2 - 60), 
+                    cv2.putText(display, "GOAL: Guide your PCB safely through the reflow oven to 100m!", (self.w//2 - 390, self.h//2 - 60), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (230, 230, 230), 1)
-                    cv2.putText(img, "CONTROLS: Lean Left or Right with your shoulders to steer.", (self.w//2 - 380, self.h//2 - 10), 
+                    cv2.putText(display, "CONTROLS: Lean Left or Right with your shoulders to steer.", (self.w//2 - 380, self.h//2 - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (180, 200, 220), 1)
 
                     is_tracking = results is not None and results.pose_landmarks is not None and len(results.pose_landmarks) > 0
                     track_status = "PLAYER DETECTED - READY!" if is_tracking else "SEARCHING FOR PLAYER (STAND BACK)..."
                     track_color = (0, 255, 128) if is_tracking else (0, 165, 255)
-                    cv2.putText(img, track_status, (self.w//2 - 210, self.h//2 + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, track_color, 1)
+                    cv2.putText(display, track_status, (self.w//2 - 210, self.h//2 + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, track_color, 1)
 
-                    cv2.putText(img, "Press [SPACEBAR] or [ENTER] to Start", (self.w//2 - 220, self.h//2 + 115), 
+                    cv2.putText(display, "Press [SPACEBAR] or [ENTER] to Start", (self.w//2 - 220, self.h//2 + 115), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 128), 2)
 
-                elif self.game_state == "PLAYING":
-                    overlay_hud = img.copy()
-                    draw_rounded_rect(overlay_hud, (30, 20), (self.w - 30, 100), (30, 38, 52), cv2.FILLED, 12)
-                    cv2.addWeighted(overlay_hud, 0.8, img, 0.2, 0, img)
-                    draw_rounded_rect(img, (30, 20), (self.w - 30, 100), (60, 80, 110), 1, 12)
-
-                    cv2.putText(img, f"STATUS: {steering_command}", (50, 60), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, steering_color, 2, cv2.LINE_AA)
-
-                    gauge_x, gauge_y, gauge_w = 50, 75, 220
-                    cv2.rectangle(img, (gauge_x, gauge_y), (gauge_x + gauge_w, gauge_y + 10), (20, 24, 33), cv2.FILLED)
-                    cv2.rectangle(img, (gauge_x, gauge_y), (gauge_x + gauge_w, gauge_y + 10), (70, 90, 110), 1)
-                    
-                    center_tick = gauge_x + gauge_w // 2
-                    max_range = 0.12
-                    lean_thresh = 0.05
-                    
-                    thresh_offset_px = int((lean_thresh / max_range) * (gauge_w / 2))
-                    left_thresh_x = center_tick - thresh_offset_px
-                    right_thresh_x = center_tick + thresh_offset_px
-
-                    cv2.line(img, (left_thresh_x, gauge_y - 2), (left_thresh_x, gauge_y + 12), (255, 200, 0), 2)
-                    cv2.line(img, (right_thresh_x, gauge_y - 2), (right_thresh_x, gauge_y + 12), (255, 200, 0), 2)
-                    
-                    clamped_diff = max(-max_range, min(max_range, shoulder_lean_diff))
-                    indicator_offset = int((clamped_diff / max_range) * (gauge_w / 2))
-                    ind_x = center_tick + indicator_offset
-                    cv2.circle(img, (ind_x, gauge_y + 5), 5, steering_color, cv2.FILLED)
-
-                    bar_x1, bar_y1, bar_x2, bar_y2 = 420, 45, 860, 70
-                    draw_rounded_rect(img, (bar_x1, bar_y1), (bar_x2, bar_y2), (20, 24, 33), cv2.FILLED, 10)
-                    filled_w = int((bar_x2 - bar_x1) * (self.distance / self.max_distance))
-                    
-                    if filled_w > 0:
-                        draw_rounded_rect(img, (bar_x1, bar_y1), (bar_x1 + filled_w, bar_y2), (0, 180, 255), cv2.FILLED, 10)
-                    draw_rounded_rect(img, (bar_x1, bar_y1), (bar_x2, bar_y2), (90, 110, 140), 1, 10)
-                    
-                    cv2.putText(img, f"OVEN PROGRESS: {int(self.distance)}m / {int(self.max_distance)}m", (bar_x1 + 35, bar_y1 + 17), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-
-                    cv2.putText(img, "HP:", (self.w - 280, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
-                    for h_idx in range(3):
-                        color = (0, 255, 128) if h_idx < self.health else (60, 70, 90)
-                        hx = self.w - 230 + (h_idx * 45)
-                        draw_rounded_rect(img, (hx, 45), (hx + 35, 75), color, cv2.FILLED, 6)
-
                 elif self.game_state == "GAME_OVER":
-                    overlay = img.copy()
+                    overlay = display.copy()
                     cv2.rectangle(overlay, (0, 0), (self.w, self.h), (10, 10, 15), cv2.FILLED)
-                    cv2.addWeighted(overlay, 0.8, img, 0.2, 0, img)
+                    cv2.addWeighted(overlay, 0.8, display, 0.2, 0, display)
 
-                    draw_rounded_rect(img, (self.w//2 - 360, self.h//2 - 160), (self.w//2 + 360, self.h//2 + 140), (40, 25, 30), cv2.FILLED, 16)
-                    draw_rounded_rect(img, (self.w//2 - 360, self.h//2 - 160), (self.w//2 + 360, self.h//2 + 140), (0, 0, 255), 2, 16)
+                    draw_rounded_rect(display, (self.w//2 - 360, self.h//2 - 160), (self.w//2 + 360, self.h//2 + 140), (40, 25, 30), cv2.FILLED, 16)
+                    draw_rounded_rect(display, (self.w//2 - 360, self.h//2 - 160), (self.w//2 + 360, self.h//2 + 140), (0, 0, 255), 2, 16)
 
-                    cv2.putText(img, "SYSTEM FAILURE", (self.w//2 - 210, self.h//2 - 80), 
+                    cv2.putText(display, "SYSTEM FAILURE", (self.w//2 - 210, self.h//2 - 80), 
                                 cv2.FONT_HERSHEY_DUPLEX, 1.5, (0, 0, 255), 2)
-                    cv2.putText(img, f"FINAL DISTANCE: {int(self.distance)}m", (self.w//2 - 180, self.h//2 - 10), 
+                    cv2.putText(display, f"FINAL DISTANCE: {int(self.distance)}m", (self.w//2 - 180, self.h//2 - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 2)
-                    cv2.putText(img, "Press 'R' to Retry  |  Press 'ESC' to Quit", (self.w//2 - 230, self.h//2 + 70), 
+                    cv2.putText(display, "Press 'R' to Retry  |  Press 'ESC' to Quit", (self.w//2 - 230, self.h//2 + 70), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (170, 170, 170), 1)
 
                 elif self.game_state == "WIN":
-                    overlay = img.copy()
+                    if not self.score_awarded:
+                        self.player_data["active_player"]["score"] += 1
+                        save_player_data(self.player_data)
+                        self.score_awarded = True
+                    overlay = display.copy()
                     cv2.rectangle(overlay, (0, 0), (self.w, self.h), (10, 15, 20), cv2.FILLED)
-                    cv2.addWeighted(overlay, 0.8, img, 0.2, 0, img)
+                    cv2.addWeighted(overlay, 0.8, display, 0.2, 0, display)
 
-                    draw_rounded_rect(img, (self.w//2 - 380, self.h//2 - 160), (self.w//2 + 380, self.h//2 + 140), (25, 45, 35), cv2.FILLED, 16)
-                    draw_rounded_rect(img, (self.w//2 - 380, self.h//2 - 160), (self.w//2 + 380, self.h//2 + 140), (0, 255, 128), 2, 16)
+                    draw_rounded_rect(display, (self.w//2 - 380, self.h//2 - 160), (self.w//2 + 380, self.h//2 + 140), (25, 45, 35), cv2.FILLED, 16)
+                    draw_rounded_rect(display, (self.w//2 - 380, self.h//2 - 160), (self.w//2 + 380, self.h//2 + 140), (0, 255, 128), 2, 16)
 
-                    cv2.putText(img, "REFLOW COMPLETE!", (self.w//2 - 240, self.h//2 - 80), 
+                    cv2.putText(display, "REFLOW COMPLETE!", (self.w//2 - 240, self.h//2 - 80), 
                                 cv2.FONT_HERSHEY_DUPLEX, 1.4, (0, 255, 128), 2)
-                    cv2.putText(img, "Successfully reached 100 meters!", (self.w//2 - 230, self.h//2 - 10), 
+                    cv2.putText(display, "Successfully reached 100 meters!", (self.w//2 - 230, self.h//2 - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                    cv2.putText(img, "Press 'R' to Play Again  |  Press 'ESC' to Quit", (self.w//2 - 250, self.h//2 + 70), 
+                    cv2.putText(display, "Press 'R' to Play Again  |  Press 'ESC' to Quit", (self.w//2 - 250, self.h//2 + 70), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (170, 170, 170), 1)
 
                 current_time = time.time()
@@ -488,29 +641,12 @@ class FactoryNavigatorGame:
                 instant_fps = 1 / dt if dt > 0 else 0
                 smoothed_fps = lerp(smoothed_fps, instant_fps, 0.1)
 
-                
-
-                if self.debug_mode:
-                    debug_overlay = img.copy()
-                    draw_rounded_rect(debug_overlay, (30, 120), (450, 320), (15, 20, 30), cv2.FILLED, 10)
-                    cv2.addWeighted(debug_overlay, 0.75, img, 0.25, 0, img)
-                    draw_rounded_rect(img, (30, 120), (450, 320), (0, 180, 255), 1, 10)
-
-                    cv2.putText(img, "--- TELEMETRY DEBUG HUD ---", (45, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 215, 255), 1)
-                    cv2.putText(img, f"Render FPS: {int(smoothed_fps)}", (45, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 1)
-                    cv2.putText(img, f"Frame Delta (dt): {dt*1000:.1f} ms", (45, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-                    cv2.putText(img, f"Active Obstacles: {len(self.obstacles)}", (45, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-                    cv2.putText(img, f"Belt Speed: {self.belt_speed:.2f}", (45, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-                    
-                    left_s_val = f"{results.pose_landmarks[0][11].y:.3f}" if (results and results.pose_landmarks) else "N/A"
-                    right_s_val = f"{results.pose_landmarks[0][12].y:.3f}" if (results and results.pose_landmarks) else "N/A"
-                    cv2.putText(img, f"Shoulder Y (L/R): {left_s_val} / {right_s_val}", (45, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-                    cv2.putText(img, f"Inference Thread Active: {self.inference_thread.is_alive()}", (45, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128) if self.inference_thread.is_alive() else (0, 0, 255), 1)
+                self.draw_debug_hud(display, smoothed_fps)
 
                 target_h = int(self.w * (10 / 16))
                 canvas = np.zeros((target_h, self.w, 3), dtype=np.uint8)
                 y_offset = (target_h - self.h) // 2
-                canvas[y_offset:y_offset+self.h, 0:self.w] = img
+                canvas[y_offset:y_offset+self.h, 0:self.w] = display
 
                 cv2.imshow(self.window_name, canvas)
 

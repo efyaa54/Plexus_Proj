@@ -10,6 +10,48 @@ import threading
 import collections
 import ctypes
 import os
+import json
+import os
+from datetime import datetime
+
+SCORE_FILE = "player_data.json"
+
+def load_player_data():
+    if os.path.exists(SCORE_FILE):
+        try:
+            with open(SCORE_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "active_player" in data:
+                    return data
+        except json.JSONDecodeError:
+            pass
+            
+    # Default fallback if file doesn't exist or is legacy format
+    return {
+        "active_player": {"name": "Guest", "score": 0, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        "leaderboard": []
+    }
+
+def save_player_data(data):
+    # Ensure active player is also recorded or updated in the leaderboard history
+    active = data["active_player"]
+    leaderboard = data.get("leaderboard", [])
+    
+    # Check if this exact session already exists in leaderboard, update it or append
+    found = False
+    for entry in leaderboard:
+        if entry["name"] == active["name"] and entry["timestamp"] == active["timestamp"]:
+            entry["score"] = active["score"]
+            found = True
+            break
+            
+    if not found:
+        leaderboard.append(active.copy())
+        
+    data["leaderboard"] = leaderboard
+    with open(SCORE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['GLOG_minloglevel'] = '2'
 
@@ -124,6 +166,7 @@ class Component:
         self.w, self.h = config["w"], config["h"]
         self.start_x, self.start_y = config["start_x"], config["start_y"]
         self.target_x, self.target_y = config["target_x"], config["target_y"]
+
         
         self.x, self.y = float(self.start_x), float(self.start_y)
         self.target_render_x, self.target_render_y = float(self.start_x), float(self.start_y)
@@ -207,6 +250,9 @@ class CircuitBuilderGame:
         self.window_name = "Plexus Circuit Builder"
 
         self.game_state = "PLAYING"
+
+        self.player_data = load_player_data()
+        self.score_awarded = False
         
         self.components = []
         self.particles = []
@@ -322,15 +368,19 @@ class CircuitBuilderGame:
         draw_rounded_rect(display, (50, 15), (self.w - 50, 70), (30, 38, 52), cv2.FILLED, 10)
         draw_rounded_rect(display, (50, 15), (self.w - 50, 70), (60, 80, 110), 1, 10)
         
+        active = self.player_data["active_player"]
+        player_text = f"PLAYER: {active['name']}  |  SCORE: {active['score']}"
+        cv2.putText(display, player_text, (self.w - 300, 52), cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 255, 128), 1)
+        
         cv2.putText(display, "PLEXUS CIRCUIT BUILDER", (75, 52), cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 255, 255), 1)
         
         instruction_text = "Pinch to grab & snap" if not self.is_pinching else "Dragging component..."
         cv2.putText(display, instruction_text, (430, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 210, 225), 1)
         
-        coord_text = f"X: {int(self.cursor_x)}  Y: {int(self.cursor_y)}"
-        draw_rounded_rect(display, (self.w - 240, 28), (self.w - 70, 58), (15, 20, 30), cv2.FILLED, 6)
-        draw_rounded_rect(display, (self.w - 240, 28), (self.w - 70, 58), (70, 85, 105), 1, 6)
-        cv2.putText(display, coord_text, (self.w - 225, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        #coord_text = f"X: {int(self.cursor_x)}  Y: {int(self.cursor_y)}"
+        #draw_rounded_rect(display, (self.w - 240, 28), (self.w - 70, 58), (15, 20, 30), cv2.FILLED, 6)
+        #draw_rounded_rect(display, (self.w - 240, 28), (self.w - 70, 58), (70, 85, 105), 1, 6)
+        #cv2.putText(display, coord_text, (self.w - 225, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
     def draw_operator_panel(self, display, results):
         if not self.show_camera_panel: return
@@ -403,8 +453,8 @@ class CircuitBuilderGame:
                 ix, iy = int(lms[8].x * pip_w), int(lms[8].y * pip_h)
                 pinch_color = (0, 255, 0) if self.is_pinching else (0, 220, 255)
                 cv2.line(pip_resized, (tx, ty), (ix, iy), pinch_color, 2)
-                cv2.circle(pip_resized, (tx, ty), 6, pinch_color, -1)
-                cv2.circle(pip_resized, (ix, iy), 6, pinch_color, -1)
+                cv2.circle(pip_resized, (tx, ty), 1, pinch_color, -1)
+                cv2.circle(pip_resized, (ix, iy), 1, pinch_color, -1)
 
             draw_rounded_rect(display, (pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3), (100, 120, 150), 2, 8)
             display[pip_y:pip_y+pip_h, pip_x:pip_x+pip_w] = pip_resized
@@ -485,6 +535,10 @@ class CircuitBuilderGame:
                     if p.life <= 0: self.particles.remove(p)
 
                 if self.game_state == "WIN":
+                    if not self.score_awarded:
+                        self.player_data["active_player"]["score"] += 1
+                        save_player_data(self.player_data)
+                        self.score_awarded = True
                     overlay = display.copy()
                     cv2.rectangle(overlay, (0, 0), (self.w, self.h), (10, 20, 15), cv2.FILLED)
                     cv2.addWeighted(overlay, 0.8, display, 0.2, 0, display)
@@ -580,6 +634,7 @@ class CircuitBuilderGame:
             comp.snapped = False
         self.grabbed_idx = None
         self.game_state = "PLAYING"
+        self.score_awarded = False
 
 if __name__ == "__main__":
     game = CircuitBuilderGame()

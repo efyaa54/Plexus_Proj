@@ -1,7 +1,7 @@
 """
-Plexus AI Arcade - Interactive How to Play
-A self-contained Flet walkthrough explaining and testing the controls for each game.
-Embeds a live OpenCV feed directly into the Flet UI.
+Plexus AI Arcade - Interactive How to Play (Authentic Mechanics Edition)
+A self-contained Flet walkthrough that exactly mirrors the game logic loops,
+teaching the player the precise computer vision interactions required.
 """
 
 from __future__ import annotations
@@ -23,6 +23,12 @@ from mediapipe.tasks.python import vision
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['GLOG_minloglevel'] = '2'
+
+
+def _hex_to_bgr(hex_color: str) -> tuple[int, int, int]:
+    hex_color = hex_color.lstrip('#')
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    return (b, g, r)  # OpenCV uses BGR
 
 # --------------------------------------------------------------------------
 # Shared visual language
@@ -63,7 +69,7 @@ def lerp(current, target, alpha=0.3):
 
 
 # --------------------------------------------------------------------------
-# Content Pages
+# Content Pages 
 # --------------------------------------------------------------------------
 
 @dataclass
@@ -78,17 +84,16 @@ class TutorialPage:
 
 PAGES: list[TutorialPage] = [
     TutorialPage(
-        game_title="Welcome",
-        subtitle="How the Arcade Works",
+        game_title="System Calibration",
+        subtitle="Operator Setup",
         objective=(
-            "Every station in the Plexus AI Arcade is controlled with your "
-            "hand in front of the webcam -- no mouse, no controller. "
-            "This walkthrough covers the controls for each game."
+            "Every station in the Plexus AI Arcade tracks your body in 3D space. "
+            "Ensure the system can see you clearly before starting."
         ),
         controls=[
-            "Stand where your hand is clearly visible to the camera",
-            "Keep your hand inside the center of the frame for best tracking",
-            "Try moving your hand now to see the tracking skeleton follow you",
+            "Stand about arm's length from the camera",
+            "Keep your hand inside the frame with fingers spread",
+            "Verify both the hand and upper-body skeletons map cleanly to your joints",
         ],
         shortcuts=["Esc closes the current game and returns to the arcade hub"],
         accent=PLEXUS_GRAY,
@@ -96,49 +101,51 @@ PAGES: list[TutorialPage] = [
     TutorialPage(
         game_title="SMT Pick and Place",
         subtitle="Circuit Builder",
-        objective="Practice the Pinch mechanism to grab components.",
+        objective="Learn the dynamic pinch scaling calculation used to manipulate components.",
         controls=[
-            "Bring your thumb and index finger together to PINCH",
-            "Pinch the floating box on the right to turn it green",
-            "Move your hand to drag it into the target zone",
+            "Keep your palm open facing the camera",
+            "Pinch using ONLY your thumb and index finger",
+            "Maintain your other three fingers OPEN so the camera tracks the pinch accurately",
+            "Grab and place all 3 components into their respective sockets sequentially",
         ],
-        shortcuts=["R resets the board", "Esc quits to the hub"],
+        shortcuts=["R resets the sequence if a component gets stuck"],
         accent=PLEXUS_RED,
     ),
     TutorialPage(
         game_title="SMT Reflow",
         subtitle="Factory Navigator",
-        objective="Practice steering by moving your body left and right.",
+        objective="Learn the center-of-gravity tracking used to steer the PCB down the conveyor.",
         controls=[
-            "Move your hand / lean your body LEFT to steer left",
-            "Lean RIGHT to steer right",
-            "Watch the live gauge to see how your balance controls the lane",
+            "Stand back so your shoulders are visible to the camera",
+            "Keep your posture straight, do not just move your hand",
+            "Lean your entire torso LEFT to hit the first target",
+            "Then, lean RIGHT to hit the second target",
         ],
-        shortcuts=["Space starts the run", "Esc quits to the hub"],
+        shortcuts=["Space starts the run in the actual game"],
         accent="#F39C12",
     ),
     TutorialPage(
         game_title="AOI Inspection",
         subtitle="AOI Inspector",
-        objective="Practice the gesture lock mechanism.",
+        objective="Learn the frame-debouncing logic used to prevent accidental decisions.",
         controls=[
-            "Show a clear THUMBS UP gesture",
-            "Hold it steady -- watch the progress bar fill up",
-            "In-game, this locks in your quality control decisions",
+            "Make a clear 'Thumbs Up' gesture to approve the board",
+            "Hold the gesture perfectly still to fill the confidence ring",
+            "Next, make a 'Thumbs Down' gesture to reject the board",
         ],
-        shortcuts=["Space starts the round", "Esc quits to the hub"],
+        shortcuts=["The system requires 35 consecutive frames to lock a decision"],
         accent=PLEXUS_GREEN,
     ),
     TutorialPage(
         game_title="X-Ray Inspection",
         subtitle="Defect Detective",
-        objective="Sweep the X-ray lens across the board.",
+        objective="Combine steering and pinching to operate the X-ray lens.",
         controls=[
-            "Move your hand to steer the circular X-ray lens",
-            "Pinch your fingers to flag a defect under the lens",
-            "Try moving the lens around the screen now",
+            "Move your open hand to steer the X-ray lens across the board",
+            "When you spot the red hidden defect, hover the lens over it",
+            "Perform a sharp pinch gesture to successfully flag the defect",
         ],
-        shortcuts=["R resets the board", "Esc quits to the hub"],
+        shortcuts=["Find all hidden defects to pass the actual game"],
         accent="#3498DB",
     ),
 ]
@@ -153,77 +160,48 @@ class TutorialApp:
         self.index = 0
         self._shutting_down = False
 
-
-        # Live Video Feed Control
         self.video_image = ft.Image(
-            src=None,
-            fit=ft.BoxFit.CONTAIN,
-            expand=True,
-            gapless_playback=True,   # keeps the last frame visible while the next decodes — reduces flicker
+            src=None, fit=ft.BoxFit.CONTAIN, expand=True, gapless_playback=True,
         )
 
-        # Vision State
+        # Authentic Game State Variables
         self.cursor_x, self.cursor_y = 320.0, 240.0
-        self.comp_x, self.comp_y = 150, 240
-        self.is_grabbed = False
-        self.gesture_frames = 0
-        self.CONFIRM_FRAMES = 25
+        
+        # Game 1: Circuit Builder (Multi-Stage)
+        self.cb_stage = 0
+        self.cb_stages = [
+            (150, 150, 480, 150, (255, 100, 50)),   # Top: L to R (Blue-ish)
+            (150, 350, 480, 350, (200, 50, 200)),   # Bottom: L to R (Purple)
+            (480, 240, 150, 240, (50, 200, 255))    # Middle: R to L (Yellow-ish)
+        ]
+        self.cb_comp_x, self.cb_comp_y = self.cb_stages[0][:2]
+        self.cb_is_grabbed = False
+        self.cb_success = False
 
-        # Initialize Mediapipe
+        # Game 2: Factory Navigator (Left then Right)
+        self.fn_lean_offset = 0.0
+        self.fn_stage = 0 # 0 = Left, 1 = Right
+        self.fn_success = False
+
+        # Game 3: AOI Inspector (Up then Down)
+        self.aoi_frames = 0
+        self.AOI_CONFIRM_FRAMES = 35
+        self.aoi_stage = 0 # 0 = Thumbs Up, 1 = Thumbs Down
+        self.aoi_success = False
+
+        # Game 4: Defect Detective
+        self.dd_defect_x, self.dd_defect_y = 450, 300
+        self.dd_success = False
+
         self._init_mediapipe()
+        self._build_ui()
 
-        # Build Static UI Layout
-        self._configure_window()
-        self.left_column = ft.Column(
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,  # card/nav fill the wrapper's width
-            spacing=30,
-        )
-        self.left_wrapper = ft.Container(
-            expand=4,
-            content=self.left_column,
-            alignment=ft.Alignment.CENTER,
-        )
-
-        self.video_container = ft.Container(
-            expand=6,
-            border_radius=24,
-            border=ft.Border.all(4, PLEXUS_RED),
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            content=self.video_image,
-            alignment=ft.Alignment.CENTER,
-        )
-
-        self.body = ft.Row(
-            expand=True,
-            spacing=30,
-            alignment=ft.MainAxisAlignment.CENTER,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=[self.left_wrapper, self.video_container],
-        )
-
-        self.page.add(
-            ft.Container(
-                expand=True,
-                padding=50,
-                alignment=ft.Alignment(0, 0),
-                content=self.body,
-            )
-        )
-
-        self._render()
-
-        # Camera setup (opened synchronously here; reading happens off-loop)
+        # Camera setup
         self.cap = cv2.VideoCapture(0)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self._video_start_time = time.time()
         self._last_ts = -1
-
-        # Run the capture/render loop as an asyncio task on Flet's own loop.
-        # Blocking work (cv2 + mediapipe) is pushed into a worker thread per
-        # frame via asyncio.to_thread; only the final `update_async()` touches
-        # the UI, and it does so from the loop thread itself.
         self.page.run_task(self._video_loop)
 
     def _init_mediapipe(self):
@@ -231,24 +209,57 @@ class TutorialApp:
         self.hand_detector = vision.HandLandmarker.create_from_options(
             vision.HandLandmarkerOptions(base_options=base_opt_h, num_hands=1, running_mode=vision.RunningMode.VIDEO)
         )
-
         base_opt_g = python.BaseOptions(model_asset_path='gesture_recognizer.task')
         self.gest_detector = vision.GestureRecognizer.create_from_options(
             vision.GestureRecognizerOptions(base_options=base_opt_g, num_hands=1, running_mode=vision.RunningMode.VIDEO)
         )
+        base_opt_p = python.BaseOptions(model_asset_path='pose_landmarker_full.task')
+        self.pose_detector = vision.PoseLandmarker.create_from_options(
+            vision.PoseLandmarkerOptions(base_options=base_opt_p, output_segmentation_masks=False, running_mode=vision.RunningMode.VIDEO)
+        )
 
-    # -- video processing -------------------------------------------------
+    def _build_ui(self):
+        self._configure_window()
+        self.left_column = ft.Column(
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            spacing=30,
+        )
+        self.left_wrapper = ft.Container(expand=4, content=self.left_column, alignment=ft.Alignment.CENTER)
+
+        self.video_container = ft.Container(
+            expand=6, border_radius=24, border=ft.Border.all(4, PLEXUS_RED),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE, content=self.video_image, alignment=ft.Alignment.CENTER,
+        )
+
+        self.body = ft.Row(
+            expand=True, spacing=30, alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[self.left_wrapper, self.video_container],
+        )
+
+        self.page.add(ft.Container(expand=True, padding=50, alignment=ft.Alignment(0, 0), content=self.body))
+        self._render()
+
+    def _reset_games(self):
+        """Resets all minigame state logic (useful for 'R' key or page flips)"""
+        self.cb_stage = 0
+        self.cb_comp_x, self.cb_comp_y = self.cb_stages[0][:2]
+        self.cb_is_grabbed = False
+        self.cb_success = False
+
+        self.fn_stage = 0
+        self.fn_success = False
+
+        self.aoi_stage = 0
+        self.aoi_frames = 0
+        self.aoi_success = False
+
+        self.dd_success = False
 
     def _capture_and_process(self) -> str | None:
-        """
-        Runs entirely in a worker thread (via asyncio.to_thread). Does the
-        blocking camera read, mediapipe inference, drawing, and JPEG encode.
-        Must NOT touch any Flet control or call page/control update methods --
-        it only returns a data URI string (or None on failure).
-        """
         ret, frame = self.cap.read()
-        if not ret:
-            return None
+        if not ret: return None
 
         frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
@@ -259,20 +270,35 @@ class TutorialApp:
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-
             ts = int((time.time() - self._video_start_time) * 1000)
-            if ts <= self._last_ts:
-                ts = self._last_ts + 1
+            if ts <= self._last_ts: ts = self._last_ts + 1
             self._last_ts = ts
 
             hand_res = self.hand_detector.detect_for_video(mp_img, ts)
             gest_res = self.gest_detector.recognize_for_video(mp_img, ts)
-
+            pose_res = self.pose_detector.detect_for_video(mp_img, ts)
+            
             idx = self.index
 
+            # --- 1. BODY/POSE TRACKING ---
+            if pose_res and pose_res.pose_landmarks:
+                pose_lms = pose_res.pose_landmarks[0]
+                mid_shoulder_x = (pose_lms[11].x + pose_lms[12].x) / 2.0
+                target_lean = (mid_shoulder_x - 0.5) * 2.0 
+                self.fn_lean_offset = lerp(self.fn_lean_offset, target_lean, 0.2)
+
+                if idx in [0, 2]:
+                    for s, e in [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16)]:
+                        cx1, cy1 = int(pose_lms[s].x * w), int(pose_lms[s].y * h)
+                        cx2, cy2 = int(pose_lms[e].x * w), int(pose_lms[e].y * h)
+                        cv2.line(frame, (cx1, cy1), (cx2, cy2), (255, 150, 0), 3)
+                        cv2.circle(frame, (cx1, cy1), 6, (255, 200, 100), -1)
+                        cv2.circle(frame, (cx2, cy2), 6, (255, 200, 100), -1)
+
+            # --- 2. HAND TRACKING ---
             if hand_res and hand_res.hand_landmarks:
                 lms = hand_res.hand_landmarks[0]
-
+                
                 target_x = max(0, min(w, lms[9].x * w))
                 target_y = max(0, min(h, lms[9].y * h))
                 self.cursor_x = lerp(self.cursor_x, target_x, 0.4)
@@ -280,107 +306,180 @@ class TutorialApp:
 
                 hand_scale = max(math.hypot(lms[0].x - lms[9].x, lms[0].y - lms[9].y), 1e-4)
                 pinch_ratio = math.hypot(lms[4].x - lms[8].x, lms[4].y - lms[8].y) / hand_scale
-                is_pinching = pinch_ratio < 0.35
+                is_pinching = pinch_ratio < 0.35 
 
-                # PAGE 0: SKELETON
-                if idx == 0:
+                if idx in [0, 1, 3, 4]:
                     for s, e in [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
                                  (9, 10), (10, 11), (11, 12), (13, 14), (14, 15), (15, 16),
                                  (0, 17), (17, 18), (18, 19), (19, 20), (5, 9), (9, 13), (13, 17)]:
                         cx1, cy1 = int(lms[s].x * w), int(lms[s].y * h)
                         cx2, cy2 = int(lms[e].x * w), int(lms[e].y * h)
-                        cv2.line(frame, (cx1, cy1), (cx2, cy2), (255, 255, 255), 2)
-                        cv2.circle(frame, (cx1, cy1), 4, (0, 215, 255), -1)
+                        cv2.line(frame, (cx1, cy1), (cx2, cy2), (0, 255, 128), 2)
+                        cv2.circle(frame, (cx1, cy1), 4, (255, 255, 255), -1)
 
-                # PAGE 2: LEAN
-                elif idx == 2:
-                    lean_val = (lms[0].x - 0.5) * 2.0
-                    cv2.line(frame, (w // 2, 0), (w // 2, h), (100, 100, 100), 2)
-                    bar_w = int(lean_val * 200)
-                    b_color = (0, 255, 128) if abs(lean_val) > 0.3 else (0, 165, 255)
-                    cv2.rectangle(frame, (w // 2, h - 60), (w // 2 + bar_w, h - 30), b_color, -1)
-                    cv2.putText(frame, "LEAN GAUGE", (w // 2 - 60, h - 70),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            # --- RENDER TUTORIAL STATES ---
 
-            # Overlays that render even if hand is lost
-            if idx == 1:
-                target_bx = w - 150
-                cv2.circle(frame, (target_bx, int(h / 2)), 60, (0, 255, 128), 2)
+            # STATE 0: Welcome Calibration
+            if idx == 0:
+                cv2.putText(frame, "STATUS: TRACKING ACTIVE", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 128), 2)
 
-                if is_pinching and math.hypot(self.cursor_x - self.comp_x, self.cursor_y - self.comp_y) < 50:
-                    self.is_grabbed = True
-                elif pinch_ratio > 0.55:
-                    self.is_grabbed = False
+            # STATE 1: Circuit Builder Logic (Multi-stage)
+            elif idx == 1:
+                # Get current stage targets
+                if self.cb_success:
+                    tx, ty, tcolor = self.cb_stages[-1][2], self.cb_stages[-1][3], self.cb_stages[-1][4]
+                else:
+                    tx, ty, tcolor = self.cb_stages[self.cb_stage][2], self.cb_stages[self.cb_stage][3], self.cb_stages[self.cb_stage][4]
 
-                if self.is_grabbed:
-                    self.comp_x, self.comp_y = int(self.cursor_x), int(self.cursor_y)
+                cv2.circle(frame, (tx, ty), 50, (0, 255, 128), 3)
+                cv2.putText(frame, f"SOCKET {self.cb_stage + 1}/3", (tx - 40, ty - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 2)
 
-                c_color = (0, 255, 0) if self.is_grabbed else (0, 165, 255)
-                cv2.rectangle(frame, (self.comp_x - 30, self.comp_y - 30),
-                              (self.comp_x + 30, self.comp_y + 30), c_color, -1)
-                cv2.circle(frame, (int(self.cursor_x), int(self.cursor_y)), 10, (255, 255, 255), 2)
+                if not self.cb_is_grabbed and is_pinching and not self.cb_success:
+                    if math.hypot(self.cursor_x - self.cb_comp_x, self.cursor_y - self.cb_comp_y) < 50:
+                        self.cb_is_grabbed = True
+                elif self.cb_is_grabbed and pinch_ratio > 0.55: # Authentic release threshold
+                    self.cb_is_grabbed = False
+                    if math.hypot(self.cb_comp_x - tx, self.cb_comp_y - ty) < 40:
+                        # Success for this stage
+                        if self.cb_stage < len(self.cb_stages) - 1:
+                            self.cb_stage += 1
+                            self.cb_comp_x, self.cb_comp_y = self.cb_stages[self.cb_stage][:2]
+                        else:
+                            self.cb_success = True
+                            self.cb_comp_x, self.cb_comp_y = tx, ty # Snap to final socket
 
+                if self.cb_is_grabbed:
+                    self.cb_comp_x, self.cb_comp_y = int(self.cursor_x), int(self.cursor_y)
+
+                # Draw Component
+                c_color = (0, 255, 0) if self.cb_success else ((0, 255, 255) if self.cb_is_grabbed else tcolor)
+                cv2.rectangle(frame, (self.cb_comp_x - 30, self.cb_comp_y - 30), (self.cb_comp_x + 30, self.cb_comp_y + 30), c_color, -1)
+                
+                # Draw Cursor Map
+                if is_pinching:
+                    cv2.circle(frame, (int(self.cursor_x), int(self.cursor_y)), 12, (0, 255, 0), cv2.FILLED)
+                else:
+                    cv2.circle(frame, (int(self.cursor_x), int(self.cursor_y)), 15, (255, 255, 255), 2)
+                    
+                if self.cb_success:
+                    cv2.putText(frame, "ALL COMPONENTS PLACED!", (w//2 - 140, 50), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 255, 0), 2)
+
+            # STATE 2: Factory Navigator Logic (Left -> Right)
+            elif idx == 2:
+                pcb_x = int(w/2 + self.fn_lean_offset * (w/2 - 80))
+                
+                # Conveyor lines
+                cv2.line(frame, (w//2 - 120, 0), (w//2 - 250, h), (100, 100, 100), 2)
+                cv2.line(frame, (w//2, 0), (w//2, h), (70, 70, 70), 2)
+                cv2.line(frame, (w//2 + 120, 0), (w//2 + 250, h), (100, 100, 100), 2)
+                
+                # Determine target lane based on stage
+                target_lane_x = w//2 + (-150 if self.fn_stage == 0 else 150)
+                
+                if not self.fn_success:
+                    cv2.rectangle(frame, (target_lane_x - 60, h//2 + 60), (target_lane_x + 60, h//2 + 180), (0, 255, 128), 2)
+                    cv2.putText(frame, "STEER HERE", (target_lane_x - 45, h//2 + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 2)
+                
+                # Collision Check
+                if abs(pcb_x - target_lane_x) < 50:
+                    if self.fn_stage == 0:
+                        self.fn_stage = 1 # Move to Right stage
+                    else:
+                        self.fn_success = True
+
+                # Draw Steering PCB
+                pcb_color = (0, 255, 0) if self.fn_success else (0, 150, 255)
+                cv2.rectangle(frame, (pcb_x - 45, h//2 + 80), (pcb_x + 45, h//2 + 160), pcb_color, -1)
+                cv2.rectangle(frame, (pcb_x - 45, h//2 + 80), (pcb_x + 45, h//2 + 160), (255, 255, 255), 2)
+                
+                if self.fn_success:
+                    cv2.putText(frame, "LEAN CALIBRATION SUCCESS!", (w//2 - 160, 50), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 255, 0), 2)
+                elif self.fn_stage == 0:
+                    cv2.putText(frame, "<- LEAN LEFT", (w//2 - 150, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                else:
+                    cv2.putText(frame, "LEAN RIGHT ->", (w//2 + 50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+            # STATE 3: AOI Inspector Logic (Up -> Down)
             elif idx == 3:
                 gest = "None"
                 if gest_res and gest_res.gestures:
                     gest = gest_res.gestures[0][0].category_name
 
-                if gest == "Thumb_Up":
-                    self.gesture_frames = min(self.CONFIRM_FRAMES, self.gesture_frames + 1)
+                target_gest = "Thumb_Up" if self.aoi_stage == 0 else "Thumb_Down"
+
+                # Debouncing logic against current target gesture
+                if gest == target_gest:
+                    self.aoi_frames = min(self.AOI_CONFIRM_FRAMES, self.aoi_frames + 1)
                 else:
-                    self.gesture_frames = max(0, self.gesture_frames - 1)
+                    self.aoi_frames = max(0, self.aoi_frames - 1)
 
                 cv2.circle(frame, (w // 2, h // 2), 60, (50, 50, 50), 6)
-                ang = int((self.gesture_frames / self.CONFIRM_FRAMES) * 360)
+                ang = int((self.aoi_frames / self.AOI_CONFIRM_FRAMES) * 360)
                 if ang > 0:
                     cv2.ellipse(frame, (w // 2, h // 2), (60, 60), 0, -90, -90 + ang, (0, 255, 128), 6)
-                cv2.putText(frame, "THUMBS UP TO FILL", (w // 2 - 80, h // 2 + 90),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                
+                if self.aoi_frames >= self.AOI_CONFIRM_FRAMES:
+                    if self.aoi_stage == 0:
+                        self.aoi_stage = 1 # Switch to Thumbs Down requirement
+                        self.aoi_frames = 0
+                    else:
+                        self.aoi_success = True
 
+                if self.aoi_success:
+                    cv2.putText(frame, "ALL DECISIONS LOCKED!", (w // 2 - 110, h // 2 + 100), cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 255, 128), 2)
+                else:
+                    instruction = f"HOLD THUMBS UP ({int((self.aoi_frames/35)*100)}%)" if self.aoi_stage == 0 else f"HOLD THUMBS DOWN ({int((self.aoi_frames/35)*100)}%)"
+                    cv2.putText(frame, instruction, (w // 2 - 100, h // 2 + 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # STATE 4: Defect Detective Logic
             elif idx == 4:
                 mask = np.zeros_like(frame)
-                cv2.circle(mask, (int(self.cursor_x), int(self.cursor_y)), 80, (0, 0, 150), -1)
+                lens_radius = 80
+                cv2.circle(mask, (int(self.cursor_x), int(self.cursor_y)), lens_radius, (0, 0, 150), -1)
                 frame = cv2.addWeighted(frame, 0.7, mask, 0.3, 0)
 
+                # Draw hidden defect
+                cv2.circle(frame, (self.dd_defect_x, self.dd_defect_y), 15, (0, 0, 255), -1)
+                
+                if is_pinching and math.hypot(self.cursor_x - self.dd_defect_x, self.cursor_y - self.dd_defect_y) < lens_radius:
+                    self.dd_success = True
+
+                if self.dd_success:
+                    cv2.rectangle(frame, (self.dd_defect_x - 30, self.dd_defect_y - 30), (self.dd_defect_x + 30, self.dd_defect_y + 30), (0, 255, 0), 3)
+                    cv2.putText(frame, "DEFECT FLAGGED!", (self.dd_defect_x - 70, self.dd_defect_y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
                 l_color = (0, 255, 0) if is_pinching else (0, 215, 255)
-                cv2.circle(frame, (int(self.cursor_x), int(self.cursor_y)), 80, l_color, 4)
+                cv2.circle(frame, (int(self.cursor_x), int(self.cursor_y)), lens_radius, l_color, 4)
                 cv2.circle(frame, (int(self.cursor_x), int(self.cursor_y)), 5, l_color, -1)
 
         except Exception as e:
             print(f"Vision error: {e}")
 
+        idx = self.index
+        accent_bgr = _hex_to_bgr(PAGES[idx].accent)
+        t = 4
+        cv2.rectangle(frame, (t, t), (w - 1 - t, h - 1 - t), accent_bgr, 8)
+
         try:
             ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if not ok:
-                return None
-            return buffer.tobytes()
+            if not ok: return None
+            b64_str = base64.b64encode(buffer).decode('utf-8')
+            return f"data:image/jpeg;base64,{b64_str}"
         except Exception as e:
-            print(f"Encode error: {e}")
             return None
 
     async def _video_loop(self):
-        """
-        Lives on Flet's asyncio loop. Delegates heavy per-frame work to a
-        worker thread so the loop stays free to service keyboard events and
-        page.update() calls from _render(), then applies the result with a
-        scoped update_async() on just the image control.
-        """
         while not self._shutting_down:
             loop_start = time.time()
+            frame_data_uri = await asyncio.to_thread(self._capture_and_process)
 
-            frame_bytes = await asyncio.to_thread(self._capture_and_process)
-
-            if frame_bytes is not None and not self._shutting_down:
-                self.video_image.src = frame_bytes
-                try:
-                    self.video_image.update()
-                except Exception as e:
-                    print(f"UI update error: {e}")
+            if frame_data_uri is not None and not self._shutting_down:
+                self.video_image.src = frame_data_uri
+                try: self.video_image.update()
+                except Exception: pass
 
             elapsed = time.time() - loop_start
             await asyncio.sleep(max(0.0, FRAME_INTERVAL_S - elapsed))
-
-    # -- lifecycle ------------------------------------------------------
 
     def _configure_window(self) -> None:
         page = self.page
@@ -392,7 +491,6 @@ class TutorialApp:
         page.window.prevent_close = True
         page.window.on_event = self._on_window_event
         page.on_keyboard_event = self._on_keyboard_event
-        #page.scroll = ft.ScrollMode.AUTO
 
     def _on_window_event(self, e: ft.WindowEvent) -> None:
         if e.type == ft.WindowEventType.CLOSE:
@@ -405,26 +503,24 @@ class TutorialApp:
             self._next()
         elif e.key == "Arrow Left":
             self._prev()
+        elif e.key == "r" or e.key == "R":
+            self._reset_games()
 
     def shutdown(self) -> None:
-        if self._shutting_down:
-            return
+        if self._shutting_down: return
         self._shutting_down = True
-        try:
-            self.cap.release()
-        except Exception:
-            pass
+        try: self.cap.release()
+        except Exception: pass
         self.page.window.visible = False
         self.page.update()
         time.sleep(SHUTDOWN_GRACE_S)
         kill_process_tree()
         os._exit(0)
 
-    # -- navigation -------------------------------------------------------
-
     def _next(self) -> None:
         if self.index < len(PAGES) - 1:
             self.index += 1
+            self._reset_games()
             self._render()
         else:
             self.shutdown()
@@ -432,17 +528,14 @@ class TutorialApp:
     def _prev(self) -> None:
         if self.index > 0:
             self.index -= 1
+            self._reset_games()
             self._render()
-
-    # -- rendering --------------------------------------------------------
 
     def _dot(self, i: int) -> ft.Container:
         active = i == self.index
         return ft.Container(
-            width=10 if active else 8,
-            height=10 if active else 8,
-            border_radius=6,
-            bgcolor=PAGES[self.index].accent if active else PLEXUS_GRAY,
+            width=10 if active else 8, height=10 if active else 8,
+            border_radius=6, bgcolor=PAGES[self.index].accent if active else PLEXUS_GRAY,
         )
 
     def _bullet_list(self, items: list[str], icon: str, color: str) -> ft.Column:
@@ -455,8 +548,7 @@ class TutorialApp:
                         ft.Icon(icon, color=color, size=18),
                         ft.Text(item, color=PLEXUS_WHITE, size=15, expand=True),
                     ],
-                )
-                for item in items
+                ) for item in items
             ],
         )
 
@@ -465,8 +557,7 @@ class TutorialApp:
         is_last = self.index == len(PAGES) - 1
 
         card = ft.Container(
-            padding=40,
-            border_radius=24,
+            padding=40, border_radius=24,
             bgcolor=ft.Colors.with_opacity(0.55, "#111111"),
             border=ft.Border.all(1, ft.Colors.with_opacity(0.15, PLEXUS_WHITE)),
             content=ft.Column(
@@ -493,8 +584,7 @@ class TutorialApp:
         )
 
         nav = ft.Row(
-            alignment=ft.MainAxisAlignment.CENTER,
-            spacing=18,
+            alignment=ft.MainAxisAlignment.CENTER, spacing=18,
             controls=[
                 ft.OutlinedButton("Back", on_click=lambda e: self._prev(), disabled=self.index == 0, style=ft.ButtonStyle(color=PLEXUS_WHITE)),
                 ft.Row(spacing=8, controls=[self._dot(i) for i in range(len(PAGES))]),
@@ -506,16 +596,12 @@ class TutorialApp:
             ],
         )
 
-        # Update ONLY the left column controls and the video border.
-        # The video container remains untouched so the stream never breaks!
         self.left_column.controls = [card, nav]
         self.video_container.border = ft.Border.all(4, p.accent)
         self.page.update()
 
-
 def main(page: ft.Page) -> None:
     TutorialApp(page)
-
 
 if __name__ == "__main__":
     ft.run(main)

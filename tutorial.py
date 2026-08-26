@@ -116,9 +116,9 @@ PAGES: list[TutorialPage] = [
         subtitle="Factory Navigator",
         objective="Learn the center-of-gravity tracking used to steer the PCB down the conveyor.",
         controls=[
-            "Stand back so your shoulders are visible to the camera",
-            "Keep your posture straight, do not just move your hand",
-            "Lean your entire torso LEFT to hit the first target",
+            "Stand back so your shoulders AND hips are visible to the camera",
+            "The system calculates lean by comparing your shoulders to your hips (the green spine)",
+            "Keep your hips planted and lean your torso LEFT to hit the first target",
             "Then, lean RIGHT to hit the second target",
         ],
         shortcuts=["Space starts the run in the actual game"],
@@ -242,7 +242,7 @@ class TutorialApp:
         self._render()
 
     def _reset_games(self):
-        """Resets all minigame state logic (useful for 'R' key or page flips)"""
+        """Resets all minigame state logic"""
         self.cb_stage = 0
         self.cb_comp_x, self.cb_comp_y = self.cb_stages[0][:2]
         self.cb_is_grabbed = False
@@ -280,20 +280,37 @@ class TutorialApp:
             
             idx = self.index
 
-            # --- 1. BODY/POSE TRACKING ---
+            # --- 1. BODY/POSE TRACKING (True Lean Mechanics) ---
             if pose_res and pose_res.pose_landmarks:
                 pose_lms = pose_res.pose_landmarks[0]
+                
+                # Shoulders (11, 12) and Hips (23, 24) for true center of gravity lean
                 mid_shoulder_x = (pose_lms[11].x + pose_lms[12].x) / 2.0
-                target_lean = (mid_shoulder_x - 0.5) * 2.0 
+                mid_shoulder_y = (pose_lms[11].y + pose_lms[12].y) / 2.0
+                
+                mid_hip_x = (pose_lms[23].x + pose_lms[24].x) / 2.0
+                mid_hip_y = (pose_lms[23].y + pose_lms[24].y) / 2.0
+                
+                # Lean is the offset between shoulders and hips, multiplied for sensitivity
+                raw_lean = (mid_shoulder_x - mid_hip_x) * 4.0 
+                target_lean = max(-1.2, min(1.2, raw_lean)) # Clamp to prevent escaping frame
+                
                 self.fn_lean_offset = lerp(self.fn_lean_offset, target_lean, 0.2)
 
                 if idx in [0, 2]:
-                    for s, e in [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16)]:
+                    # Draw upper body bounding box/frame
+                    for s, e in [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (11, 23), (12, 24), (23, 24)]:
                         cx1, cy1 = int(pose_lms[s].x * w), int(pose_lms[s].y * h)
                         cx2, cy2 = int(pose_lms[e].x * w), int(pose_lms[e].y * h)
-                        cv2.line(frame, (cx1, cy1), (cx2, cy2), (255, 150, 0), 3)
-                        cv2.circle(frame, (cx1, cy1), 6, (255, 200, 100), -1)
-                        cv2.circle(frame, (cx2, cy2), 6, (255, 200, 100), -1)
+                        cv2.line(frame, (cx1, cy1), (cx2, cy2), (255, 150, 0), 2)
+                        cv2.circle(frame, (cx1, cy1), 4, (255, 200, 100), -1)
+                        cv2.circle(frame, (cx2, cy2), 4, (255, 200, 100), -1)
+                    
+                    # Draw True Center of Gravity (Neon Green Spine Vector)
+                    sx, sy = int(mid_shoulder_x * w), int(mid_shoulder_y * h)
+                    hx, hy = int(mid_hip_x * w), int(mid_hip_y * h)
+                    cv2.line(frame, (hx, hy), (sx, sy), (0, 255, 128), 5)
+                    cv2.circle(frame, (sx, sy), 8, (0, 255, 128), -1)
 
             # --- 2. HAND TRACKING ---
             if hand_res and hand_res.hand_landmarks:
@@ -325,7 +342,6 @@ class TutorialApp:
 
             # STATE 1: Circuit Builder Logic (Multi-stage)
             elif idx == 1:
-                # Get current stage targets
                 if self.cb_success:
                     tx, ty, tcolor = self.cb_stages[-1][2], self.cb_stages[-1][3], self.cb_stages[-1][4]
                 else:
@@ -340,7 +356,6 @@ class TutorialApp:
                 elif self.cb_is_grabbed and pinch_ratio > 0.55: # Authentic release threshold
                     self.cb_is_grabbed = False
                     if math.hypot(self.cb_comp_x - tx, self.cb_comp_y - ty) < 40:
-                        # Success for this stage
                         if self.cb_stage < len(self.cb_stages) - 1:
                             self.cb_stage += 1
                             self.cb_comp_x, self.cb_comp_y = self.cb_stages[self.cb_stage][:2]
@@ -351,11 +366,9 @@ class TutorialApp:
                 if self.cb_is_grabbed:
                     self.cb_comp_x, self.cb_comp_y = int(self.cursor_x), int(self.cursor_y)
 
-                # Draw Component
                 c_color = (0, 255, 0) if self.cb_success else ((0, 255, 255) if self.cb_is_grabbed else tcolor)
                 cv2.rectangle(frame, (self.cb_comp_x - 30, self.cb_comp_y - 30), (self.cb_comp_x + 30, self.cb_comp_y + 30), c_color, -1)
                 
-                # Draw Cursor Map
                 if is_pinching:
                     cv2.circle(frame, (int(self.cursor_x), int(self.cursor_y)), 12, (0, 255, 0), cv2.FILLED)
                 else:
@@ -366,6 +379,7 @@ class TutorialApp:
 
             # STATE 2: Factory Navigator Logic (Left -> Right)
             elif idx == 2:
+                # The visual box's position is dictated by the true lean offset
                 pcb_x = int(w/2 + self.fn_lean_offset * (w/2 - 80))
                 
                 # Conveyor lines
@@ -373,7 +387,7 @@ class TutorialApp:
                 cv2.line(frame, (w//2, 0), (w//2, h), (70, 70, 70), 2)
                 cv2.line(frame, (w//2 + 120, 0), (w//2 + 250, h), (100, 100, 100), 2)
                 
-                # Determine target lane based on stage
+                # Target lane based on stage
                 target_lane_x = w//2 + (-150 if self.fn_stage == 0 else 150)
                 
                 if not self.fn_success:
@@ -407,7 +421,6 @@ class TutorialApp:
 
                 target_gest = "Thumb_Up" if self.aoi_stage == 0 else "Thumb_Down"
 
-                # Debouncing logic against current target gesture
                 if gest == target_gest:
                     self.aoi_frames = min(self.AOI_CONFIRM_FRAMES, self.aoi_frames + 1)
                 else:
@@ -420,7 +433,7 @@ class TutorialApp:
                 
                 if self.aoi_frames >= self.AOI_CONFIRM_FRAMES:
                     if self.aoi_stage == 0:
-                        self.aoi_stage = 1 # Switch to Thumbs Down requirement
+                        self.aoi_stage = 1
                         self.aoi_frames = 0
                     else:
                         self.aoi_success = True
@@ -438,7 +451,6 @@ class TutorialApp:
                 cv2.circle(mask, (int(self.cursor_x), int(self.cursor_y)), lens_radius, (0, 0, 150), -1)
                 frame = cv2.addWeighted(frame, 0.7, mask, 0.3, 0)
 
-                # Draw hidden defect
                 cv2.circle(frame, (self.dd_defect_x, self.dd_defect_y), 15, (0, 0, 255), -1)
                 
                 if is_pinching and math.hypot(self.cursor_x - self.dd_defect_x, self.cursor_y - self.dd_defect_y) < lens_radius:

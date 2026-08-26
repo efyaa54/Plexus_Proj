@@ -305,7 +305,7 @@ class ArcadeHub:
             color=PLEXUS_WHITE,
             bgcolor=PLEXUS_CHARCOAL,
             height=50,
-            content_padding=10
+            content_padding=5
         )
         
         self.score_text = ft.Text(
@@ -343,33 +343,41 @@ class ArcadeHub:
             ft.Container(
                 expand=True,
                 image=ft.DecorationImage(src="hub_bg.png", fit=ft.BoxFit.COVER),
-                alignment=ft.Alignment(0, 0),
-                content=ft.Container(
-                    padding=60,
-                    width=700,
-                    border_radius=100,
-                    bgcolor=ft.Colors.with_opacity(0.65, PLEXUS_CHARCOAL),
-                    blur=ft.Blur(5, 5, ft.BlurTileMode.MIRROR),
-                    content=ft.Column(
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=15,
-                        tight=True,
-                        controls=[
-                            ft.Image(src="plexus_logo.png", width=250, fit=ft.BoxFit.CONTAIN),
-                            ft.Text(
-                                "PLEXUS AI ARCADE",
-                                color=PLEXUS_WHITE,
-                                style=ft.TextStyle(size=36, weight=ft.FontWeight.W_900, letter_spacing=2),
+                alignment=ft.Alignment(0, 0),  # <--- THIS CENTERS EVERYTHING HORIZONTALLY & VERTICALLY
+                content=ft.Column(
+                    expand=True,
+                    scroll=ft.ScrollMode.AUTO,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            padding=40, 
+                            width=700,
+                            border_radius=48, 
+                            bgcolor=ft.Colors.with_opacity(0.35, PLEXUS_CHARCOAL),
+                            blur=ft.Blur(5, 5, ft.BlurTileMode.MIRROR),
+                            content=ft.Column(
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                spacing=15,
+                                tight=True,
+                                controls=[
+                                    ft.Image(src="plexus_logo.png", width=250, fit=ft.BoxFit.CONTAIN),
+                                    ft.Text(
+                                        "PLEXUS AI ARCADE",
+                                        color=PLEXUS_WHITE,
+                                        style=ft.TextStyle(size=36, weight=ft.FontWeight.W_900, letter_spacing=2),
+                                    ),
+                                    self.score_text,
+                                    ft.Container(height=10),
+                                    player_registration_row,
+                                    ft.Container(height=20),
+                                    *[self._plexus_button(label, script) for label, script in GAMES],
+                                ],
                             ),
-                            self.score_text,
-                            ft.Container(height=10),
-                            player_registration_row,
-                            ft.Container(height=20),
-                            *[self._plexus_button(label, script) for label, script in GAMES],
-                        ],
-                    ),
-                ),
+                        )
+                    ]
+                )
             )
         )
 

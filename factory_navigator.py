@@ -213,7 +213,7 @@ class FactoryNavigatorGame:
         self.inference_lock = threading.Lock()
         self.inference_running = True
 
-        base_options = python.BaseOptions(model_asset_path='pose_landmarker_full.task', delegate=python.BaseOptions.Delegate.CPU)
+        base_options = python.BaseOptions(model_asset_path='pose_landmarker_lite.task', delegate=python.BaseOptions.Delegate.CPU)
         options = vision.PoseLandmarkerOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.VIDEO,
